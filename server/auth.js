@@ -71,13 +71,74 @@ export function issueAccessToken({ userId, orgId, role, permVersion }, secret) {
 // `node scripts/check-jwt.js` is the public test suite for this function.
 // ---------------------------------------------------------------------------
 export function verifyAccessToken(token, secret) {
-  // YOURS TO WRITE. Every failure mode listed above must be a 401 UNAUTHENTICATED.
-  // `node scripts/check-jwt.js` is the public suite for this function.
-  throw Object.assign(
-    new Error('TODO: server/auth.js — verifyAccessToken() is yours to write (AUTH-DATA-MODEL.md §10).'),
-    { code: 'NOT_IMPLEMENTED' }
-  );
+  // Step 1: structural check — must be exactly three dot-separated segments.
+  // Anything else (opaque refresh tokens, null, one segment, four segments) fails here.
+  if (typeof token !== 'string' || !token) throw unauthenticated('malformed token');
+  const parts = token.split('.');
+  if (parts.length !== 3) throw unauthenticated('malformed token');
+
+  const [rawHeader, rawPayload, rawSig] = parts;
+
+  // Step 2: decode the header and verify it is the one we expect.
+  // We do NOT trust the header's alg field to select the algorithm — we always use HS256.
+  // We check the header's values to catch alg:none and algorithm-substitution attacks.
+  let header;
+  try {
+    const text = unb64(rawHeader).toString('utf8');
+    header = JSON.parse(text);
+  } catch {
+    throw unauthenticated('malformed token header');
+  }
+  if (typeof header !== 'object' || header === null || Array.isArray(header)) {
+    throw unauthenticated('malformed token header');
+  }
+  if (header.alg !== ALG) throw unauthenticated('unsupported algorithm');
+  if (header.typ !== 'JWT') throw unauthenticated('unsupported token type');
+
+  // Step 3: verify the signature in constant time before touching the payload.
+  // We recompute over exactly `{header}.{payload}` using HS256 regardless of the header.
+  // timingSafeEqual requires equal-length buffers; if the supplied sig has a different
+  // length we know it's wrong but must still compare to avoid timing oracle.
+  let sigActual;
+  try {
+    sigActual = unb64(rawSig);
+  } catch {
+    throw unauthenticated('malformed token signature');
+  }
+  const sigExpected = createHmac('sha256', secret)
+    .update(`${rawHeader}.${rawPayload}`)
+    .digest();
+
+  if (sigActual.length !== sigExpected.length) throw unauthenticated('invalid signature');
+  if (!timingSafeEqual(sigActual, sigExpected)) throw unauthenticated('invalid signature');
+
+  // Step 4: decode the payload (we now know it was signed by us).
+  let claims;
+  try {
+    const text = unb64(rawPayload).toString('utf8');
+    claims = JSON.parse(text);
+  } catch {
+    throw unauthenticated('malformed token payload');
+  }
+  if (typeof claims !== 'object' || claims === null || Array.isArray(claims)) {
+    throw unauthenticated('malformed token payload');
+  }
+
+  // Step 5: validate exp — half-open means exp == now is already expired.
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof claims.exp !== 'number') throw unauthenticated('missing or invalid exp');
+  if (claims.exp <= now) throw unauthenticated('token expired');
+
+  // Step 6: validate iss and aud.
+  if (claims.iss !== ISS) throw unauthenticated('invalid issuer');
+  if (claims.aud !== AUD) throw unauthenticated('invalid audience');
+
+  // Step 7: validate jti — must be a non-empty string.
+  if (!claims.jti || typeof claims.jti !== 'string') throw unauthenticated('missing jti');
+
+  return claims;
 }
+
 
 
 // The freshness check (AUTH-DATA-MODEL.md §3). Compares the token's pv against the

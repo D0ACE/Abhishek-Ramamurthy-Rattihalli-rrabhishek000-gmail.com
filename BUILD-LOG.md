@@ -26,8 +26,23 @@ Note: this is the failure mode where a passing test is worse than a failing one.
 
 ## Phase 0 — orientation
 
-_Installed, reset the database, read the documents, ran the suites against the untouched skeleton.
-What did the starting line actually look like, and which failure surprised you?_
+2026-09-26. Installed, loaded the DB (`node scripts/load-db.js`), read all four spec docs,
+ran `check-jwt.js` against the untouched skeleton.
+
+Starting line: 0/43 on JWT. Expected the stub to fail — it does, but the failure mode is
+wrong. The stub throws a plain `Error` with `code: 'NOT_IMPLEMENTED'`, which is not an
+`HttpError`. The test harness reports `Error: TODO...` instead of `401 UNAUTHENTICATED`.
+
+This is the point of the test: a stub that throws unconditionally passes nothing, because
+the shape of the rejection is also checked — not just that it throws, but that it throws
+the *right* thing. A dumb always-reject stub would still fail all 43.
+
+The load-db path issue (`A:\A:\...` doubled) only happens when running via PowerShell
+redirection on Windows — using `node scripts/load-db.js` without `2>&1` works fine.
+
+Also confirmed: `PRAGMA foreign_keys` must be set in `server/db.js` per-connection. It is
+already set there (and I verified: removing it lets `grant_permissions` accept unknown
+permission strings, putting it back causes `FOREIGN KEY constraint failed`).
 
 ## Phase 1 — token verification
 
