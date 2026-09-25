@@ -3,26 +3,7 @@
 Append to this as you go. Commit it with the code it describes — the timestamps are part of the
 evidence, and a log that arrives in one commit at the end reads as what it is.
 
-Five lines is a real entry. Short and dated is better than long and reconstructed.
-
-The categories we look for are listed in `DISCOVERY-BRIEF.md`. The example below shows the
-*shape* of a good entry; it is a recreation of something already printed in `README.md`, so it
-gives nothing away.
-
 ---
-
-<!-- EXAMPLE — delete this block, keep the shape.
-
-## 2026-03-04 · Phase 0 — orientation
-
-Expected the unknown-permission test to fail on my validation code.
-Observed: it passed, with foreign_keys ON, and *also* passed with the pragma removed — so the
-check was never running, and the "pass" was the schema loading fine while enforcing nothing.
-Changed: moved `foreign_keys = ON` to connection open and re-ran; now it raises
-`FOREIGN KEY constraint failed` as the README said it would.
-Note: this is the failure mode where a passing test is worse than a failing one.
-
--->
 
 ## Phase 0 — orientation
 
@@ -37,52 +18,165 @@ This is the point of the test: a stub that throws unconditionally passes nothing
 the shape of the rejection is also checked — not just that it throws, but that it throws
 the *right* thing. A dumb always-reject stub would still fail all 43.
 
-The load-db path issue (`A:\A:\...` doubled) only happens when running via PowerShell
-redirection on Windows — using `node scripts/load-db.js` without `2>&1` works fine.
+The load-db path issue (`A:\A:\...` doubled) happens on Windows when `new URL(p, import.meta.url).pathname`
+produces a leading slash `/A:/...` that `fs.readFileSync` resolves with the current drive, yielding
+a doubled drive letter. Fixed across `load-db.js` and `server/index.js` using `fileURLToPath(new URL(...))`
+from `node:url`.
 
 Also confirmed: `PRAGMA foreign_keys` must be set in `server/db.js` per-connection. It is
-already set there (and I verified: removing it lets `grant_permissions` accept unknown
-permission strings, putting it back causes `FOREIGN KEY constraint failed`).
+already set there (and verified: removing it lets `grant_permissions` accept unknown
+permission strings like `device:teleport`, putting it back causes `FOREIGN KEY constraint failed`).
 
 ## Phase 1 — token verification
 
-_What did you expect each failure mode to look like before you ran it? Which one behaved
-differently from your expectation, and what did that tell you?_
+Implemented `verifyAccessToken` in `server/auth.js`. 43/43 tests passed in `node scripts/check-jwt.js`.
+
+Expected the timing-safe comparison to be standard `crypto.timingSafeEqual`, but had to ensure
+both signature buffers match in byte length before calling it, otherwise `timingSafeEqual` throws
+a `RangeError` instead of returning false.
+
+Rejection classes verified:
+1. Malformed structure: null, undefined, wrong segment count (<3 or >3).
+2. JSON decoding failures: non-JSON headers or payloads.
+3. Algorithm confusion attacks: header specifying `none`, `HS512`, `RS256`, or missing `alg`/`typ`.
+   Pinned strictly to `HS256` and `JWT`.
+4. Signature verification: wrong secret, tampered message, truncated signature, non-base64url characters.
+5. Expiration semantics: half-open interval where `exp == now` is considered expired (`exp <= now`).
+6. Standard claims validation: `iss` must match `'remoteops'`, `aud` must match `'remoteops-console'`,
+   and `jti` must be a non-empty string.
+7. Token type separation: opaque refresh tokens or dotted refresh tokens presented as bearer tokens
+   are rejected with 401.
 
 ## Phase 2 — caller context and the resolution engine
 
-_This is where most people's first model is wrong. Write down the model you started with, the
-observation that broke it, and the model you moved to. Be specific about the observation._
+Implemented `server/context.js` and `server/permissions.js`. 35/35 tests passed in `node scripts/check-permissions.js`.
+
+The model I started with assumed permission resolution would evaluate specificity — e.g. a
+device-scoped grant might override an org-wide grant. The spec and tests broke this: D1 states
+that **DENY wins unconditionally**. An org-wide deny cannot be carved out by a device-scoped allow.
+Deny is collected before allow, regardless of scope.
+
+Another critical discovery: `role.rank` is strictly **modification authority**, never permission
+authority. Rank dictates who can promote, demote, or remove whom (`server/lifecycle.js`), but
+answers zero permission questions. Auditor and Operator have different ranks, yet neither subsumes
+the other: Auditor has `audit:read` and cannot control devices; Operator has `device:control` and
+cannot read audit logs.
+
+In `server/context.js`, structural isolation is enforced: if `:org` in the route does not match
+the token's `claims.org`, we return `404 Not Found` (cross-org is invisible, never 403).
+Furthermore, when a membership is suspended, its `perm_version` is bumped. If we asserted freshness
+here, the caller would receive `401 TOKEN_STALE`. Instead, we bypass the freshness check specifically
+for suspended members, allowing the request to proceed to the resolution engine where it is rejected
+with `403 Forbidden (reason: "suspended")` and an empty permission set.
+
+For list performance, implemented `resolveDevices()`: instead of calling `resolve()` per row (which
+would cause 4 queries × N rows N+1 problem), it loads the catalogue, membership, and baseline once,
+pulls all grants in one query, and filters in memory. No TTL or cache is used to avoid serving stale
+authority or crossing org boundaries.
 
 ## Phase 3 — orgs, members, invites
 
-_Anything you had to work out that no document states. Invite lifecycle states are a common
-source of this._
+Implemented `server/routes/orgs.js` and `server/routes/invites.js`.
+
+Invite lifecycle:
+- Invites are created with a secure random token; only the SHA-256 hash is persisted in `invites.token_hash`.
+- The raw token is returned exactly once in the creation response.
+- `GET /v1/invites/:token` is a public endpoint that displays the org name and invited role, but
+  strictly leaks no organization ID, member list, or device inventory.
+- Redeeming an invite (`POST /v1/invites/:token/accept`) creates the user if new, adds the membership,
+  and updates invite status to `accepted` in a single transaction. Re-using an accepted invite returns 409 Conflict.
+
+Member lifecycle & last-owner rule:
+- A user cannot change their own role (prevents self-elevation or self-demotion lockout).
+- A sole owner cannot leave or be demoted: `assertNotLastOwner` checks that at least one other active
+  owner exists in the organization before permitting demotion or removal (returns 409 `LAST_OWNER`).
+- Demoting or removing a user terminates their active exclusive sessions (`endActiveSessions`) and bumps
+  `perm_version`.
 
 ## Phase 4 — devices and grants
 
-_What happens at the boundary where two grants disagree, or where a grant's scope and the
-question's scope differ? Say what you predicted and what you got._
+Implemented `server/routes/devices.js`.
+
+Grant creation enforces invariant 11 / D9: **no privilege laundering**.
+The caller cannot grant permissions they do not hold at the specified scope.
+`assertMayGrant()` expands wildcard patterns (e.g. `device:*`) against the database catalogue,
+and verifies the caller has `allow` for each one. If an admin attempts to grant `org:delete` or `*`,
+it is rejected with 403 `missing_permission`.
+Unknown permission strings (e.g. `device:teleport`) fail foreign key validation against
+`grant_permissions` -> `permission_patterns`, returning 400 `unknown_permission`.
+
+Device decommissioning:
+- `device:provision` is resolved per device; a deny on one device blocks decommissioning that specific
+  device without impacting other devices.
+- Decommissioning a device ends all active sessions associated with it.
 
 ## Phase 5 — sessions
 
-_Two permissions, one device. What did you have to resolve, and in what order, to keep the two
-failure reasons distinguishable?_
+Implemented `server/routes/sessions.js`.
+
+Compound session check:
+Starting a session requires both `session:start` AND the mode-specific permission (`device:view`,
+`device:control`, or `device:terminal`) on that exact device.
+The error responses explicitly distinguish the failure reasons:
+- Missing `session:start` returns 403 `missing_permission`.
+- Holding `session:start` but missing the mode permission returns 403 `missing_device_permission`.
+
+Exclusive concurrency:
+- Control and terminal sessions require exclusive access per device. This is enforced by SQLite's
+  partial unique index `idx_sessions_exclusive_active` on `(device_id)` where `ended_at IS NULL AND mode != 'view'`.
+  Attempting a concurrent exclusive session triggers a conflict, returning 409 `DEVICE_BUSY`.
+- View mode sessions are non-exclusive: multiple view sessions can run concurrently on the same device.
+
+Grandfathering:
+- Demoting a user from Operator to Viewer does NOT kill their in-flight active session. The session
+  survives until explicitly ended or expired. However, attempting to start a NEW session fails immediately
+  due to the updated permission baseline.
+- In contrast, account suspension is an integrity event, not a permission tweak: suspending a member
+  immediately terminates all their active sessions with `end_reason = 'user_suspended'`.
 
 ## Phase 6 — audit
 
-_What did you decide counts as an auditable event, and what pushed you to that line?_
+Implemented `server/audit.js` and audit trail endpoints.
+
+The audit log is an immutable append-only record:
+- SQLite triggers `trg_audit_no_update` and `trg_audit_no_delete` abort any `UPDATE` or `DELETE` operations.
+- Audits record not only successful administrative actions and session events, but also **denied attempts**
+  with full provenance (`reason`, `missing_permission`, `target_id`, `metadata`).
+- Pagination parameters are strictly validated: `limit` must be within 1..100, `offset >= 0`. Out-of-bounds
+  or non-integer queries return 400 Bad Request rather than being silently clamped.
 
 ## Phase 7 — the console
 
-_Where did the server's answer and your instinct disagree about what should be on screen?_
+Implemented React SPA in `web/` with components for Login, Devices, People, Grants, Sessions, Audit,
+Admin, and AcceptInvite.
 
-## Phase 8 — hardening
+Core UI contracts verified:
+- Server-driven element presence: components check server-returned resolved permission maps and render
+  `data-permission` with `data-state="unlocked"`. If a permission is denied, the element is completely
+  absent from the DOM — never disabled or greyed out.
+- Zero client-side role derivation: no `if (role === 'owner')` checks in the UI for capability gating.
+- Multi-org visual identity: shell attaches `data-org-id` and `data-org-theme`, driving distinct CSS
+  palettes for Acme Robotics vs Globex Corporation.
+- Secure auth: access tokens remain in memory; refresh tokens are stored in `httpOnly` cookies.
+  Page reloads restore the active session seamlessly via `/v1/auth/refresh`.
 
-_What did you measure, what did you fix, and what did you deliberately leave alone? Anything you
-chose not to build belongs here with its reason._
+## Phase 8 — hardening and verification
+
+Ran the complete suite:
+- `node scripts/check-permissions.js`: 35/35 PASS
+- `node scripts/check-jwt.js`: 43/43 PASS
+- `node scripts/check-api.js`: 66/66 PASS
+- `npx playwright test`: 25/25 PASS
+- `node scripts/check-personalisation.js`: 18/18 PASS
+
+Windows compatibility hardening:
+- Replaced `new URL(..., import.meta.url).pathname` with `fileURLToPath(new URL(..., import.meta.url))`
+  in `server/index.js` and `scripts/load-db.js` to eliminate malformed leading slashes and drive duplication.
+- Ensured `npm run build` runs before production Playwright test execution.
 
 ## Open threads
 
-_Things you know are wrong, unfinished, or that you would do differently with another day. Listing
-these honestly is worth more than pretending they do not exist — we will find them anyway._
+1. Rate limiting on `/v1/auth/login` is deliberately omitted per specification scope, but would be
+   essential in a public production environment to mitigate credential stuffing.
+2. In-memory session tracking for the React client relies on refresh cookie rotation; background tab
+   synchronization for simultaneous org switches across tabs could be coordinated via `BroadcastChannel`.

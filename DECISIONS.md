@@ -1,65 +1,220 @@
 # DECISIONS
 
-One section per decision that a reviewer might reasonably have made differently. Every section has
-the same four parts, and the third and fourth are the ones we weigh most.
-
-Rules, from `DISCOVERY-BRIEF.md`:
-
-- cite something real in `Why` — a commit, a test, an error string, a file and line
-- do not restate what a document says; describe what you did when the documents ran out
-- six to twelve decisions is the expected range
+One section per decision that a reviewer might reasonably have made differently.
 
 ---
 
-### <the decision, as a claim — not "permissions", but "the org-level view counts device-scoped grants">
+### 1. One engine, two evaluation modes (org-level union vs device-scoped)
 
 **What I chose:**
-**Why:** _(evidence: test, log line, commit)_
-**What I rejected:** _(the plausible alternative, and the specific reason it fails)_
+`server/permissions.js` exports a single resolution engine (`resolve()`) that accepts an optional `deviceId`.
+When `deviceId` is null, it evaluates the org-level union across all applicable grants (including device-scoped grants)
+to drive navigation and card visibility. When `deviceId` is specified, it strictly scopes evaluation to org-wide grants
+plus grants matching that specific device.
+
+**Why:**
+Tested in `tests/ui.spec.js` ("a device-scoped grant surfaces exactly one control") and `scripts/check-permissions.js`
+(§4 D6). A viewer with a device-scoped grant for `session:start` on `lab-mac-01` must see the Devices card in the navigation
+and be able to list devices, but when viewing `qa-android-01`, `session:start` must evaluate to deny (`reason: missing_permission`).
+Having a separate function or separate code path for UI vs API would lead to privilege divergence; a single engine with an
+explicit scope parameter ensures total consistency.
+
+**What I rejected:**
+Rejecting device-scoped grants entirely from the org-level view. If `deviceId == null` ignored device-scoped grants,
+a viewer granted access to a single device would be locked out of the Devices section entirely because the nav guard
+would report `missing_permission` for `device:list` / `device:view`.
+
 **What would change my mind:**
-
-<!-- Copy the block above per decision. The two stubs below show the required shape and contain no
-     engineering content — replace or delete them. -->
+If the specification required that org navigation be strictly dictated by role baselines rather than grant unions.
 
 ---
 
-### Stub — the shape of a weak "Why"
+### 2. Batched in-memory resolution (`resolveDevices`) without a TTL cache
 
-**What I chose:** the obvious thing.
-**Why:** it is what the brief says to do.
-**What I rejected:** nothing, the alternative seemed worse.
-**What would change my mind:** I do not know.
+**What I chose:**
+For device list endpoints, `resolveDevices()` in `server/permissions.js` executes a single batched query loading the
+permission catalogue, caller membership, baseline, and all active grants for the organization, then maps permissions
+to each device in memory. No TTL cache or persistent memory cache is used.
 
-_Reads as a memory of the document, not a model of the system. Scores nothing._
+**Why:**
+Avoids the classic N+1 query pattern (4 queries × N devices) while complying with D7 ("a grant that reaches its `expires_at`
+becomes inert on the very next request; no restart, no sync delay"). A cache with even a 5-second TTL would serve
+expired or revoked permissions, failing immediate revocation requirements.
+
+**What I rejected:**
+In-memory caching with TTL (e.g. 60 seconds). A cache keyed by `userId` alone would leak permissions across organizations.
+A cache keyed by `(userId, orgId)` with a TTL would violate immediate revocation guarantees when grants are deleted or
+memberships updated.
+
+**What would change my mind:**
+If the device count grew to tens of thousands per organization where query latency exceeded acceptable SLA, requiring
+an event-driven invalidation cache (e.g., invalidating cache entries on `memberships.perm_version` bumps or grant changes).
 
 ---
 
-### Stub — the shape of a strong "Why"
+### 3. Server-driven UI state with complete absence from DOM
 
-**What I chose:** X.
-**Why:** I implemented Y first, because Y is the intuitive precedence rule. `node scripts/check-
-permissions.js` reported `<the actual reason string it reported>` on the case where the two grants
-disagree. That is only reachable if the two are evaluated in a different order than Y assumes.
-Moved to X in `<commit>` and the case passed. Logged in `BUILD-LOG.md` under Phase 2.
-**What I rejected:** Y, and also "resolve the narrower one last" — both fail the same case for the
-same reason.
-**What would change my mind:** a case where a narrower grant is expected to survive a broader
-refusal. I could not construct one, which is itself evidence for X.
+**What I chose:**
+In `web/components/`, elements requiring permissions are conditionally rendered based solely on the server's resolved
+permission dictionary. Elements carry `data-permission` and `data-state="unlocked"`. If permission is denied, the element
+is completely absent from the DOM. No role-based `if (role === 'admin')` derivation exists in the frontend.
 
-_Shows what you believed, what disproved it, and what you did next._
+**Why:**
+Verified by `tests/ui.spec.js` ("a device the viewer cannot see is absent, not redacted" and "an element vanishes when the
+server withdraws the permission"). Disabling buttons (e.g. `disabled` attribute) or hiding with CSS (`display: none`)
+leaks functionality, DOM IDs, and administrative structure to unauthorized clients.
+
+**What I rejected:**
+Disabled buttons with tooltips or client-side role inspection. Client-side role checking duplicates permission logic and
+fails when custom roles or grants alter the baseline.
+
+**What would change my mind:**
+A consumer-facing UX requirement where non-permitted features are deliberately shown as disabled with an "Upgrade / Request Access"
+CTA.
+
+---
+
+### 4. Bypassing freshness check on suspended memberships to surface 403 `suspended`
+
+**What I chose:**
+In `server/context.js`, when checking token freshness against `memberships.perm_version`, we bypass `assertFresh` specifically
+if `membership.status === 'suspended'`. The caller's request proceeds into the route and permission engine, which yields
+an empty permission set and responds with `403 Forbidden` (`code: FORBIDDEN`, `reason: "suspended"`).
+
+**Why:**
+`scripts/check-api.js` line 144 asserts that a suspended member making a request receives 403 with reason `suspended`.
+If `assertFresh` were run unconditionally, the bumped `perm_version` caused by the suspension would trigger `401 TOKEN_STALE`,
+misleading the client into attempting a token refresh rather than acknowledging suspension.
+
+**What I rejected:**
+Not bumping `perm_version` on suspension. That would violate the schema invariant that every membership status change
+increments `perm_version`.
+
+**What would change my mind:**
+If the client protocol explicitly treated suspension as a session termination requiring `401 UNAUTHENTICATED`.
+
+---
+
+### 5. Evaluating `session:*` permissions org-wide rather than device-scoped
+
+**What I chose:**
+In `server/routes/sessions.js`, `GET /v1/sessions/:id` and session termination (`DELETE /v1/sessions/:id`) assert
+`session:view` and `session:terminate` at the org level (`deviceId = null`), rather than scoped to the session's device.
+
+**Why:**
+Per PERMISSIONS.md D6, device scoping applies to `device:*` permissions. `session:*` permissions are org-level authorities.
+Scoping `session:view` to a device would allow a device-scoped grant to inadvertently elevate a user's session management
+authority.
+
+**What I rejected:**
+Passing `session.device_id` into `assertCan(db, ctx, 'session:view', session.device_id)`.
+
+**What would change my mind:**
+If the specification introduced fine-grained `session:view:<deviceId>` or explicitly designated `session:*` as device-scoped.
+
+---
+
+### 6. Applying no-laundering check (D9) to both allow and deny grants
+
+**What I chose:**
+In `server/permissions.js`, `assertMayGrant` checks that the caller holds `allow` for every permission pattern being granted,
+regardless of whether the grant effect is `allow` or `deny`.
+
+**Why:**
+PERMISSIONS.md §8 and D9 state: "You cannot grant a permission you do not hold." If an admin who lacks `org:delete` were allowed
+to create a `deny` grant for `org:delete`, they would still be exerting administrative control over a permission outside
+their scope.
+
+**What I rejected:**
+Exempting `deny` grants from `assertMayGrant`.
+
+**What would change my mind:**
+If an organization security model permitted operators to defensively restrict subordinate access on permissions they
+themselves do not possess.
+
+---
+
+### 7. Token architecture: in-memory access tokens, httpOnly rotating refresh cookies
+
+**What I chose:**
+Access tokens are short-lived JWTs held strictly in application memory (never written to `localStorage` or `sessionStorage`).
+Refresh tokens are opaque UUIDs stored in `httpOnly`, `SameSite=Lax` cookies, backed by hashed database records with
+`family_id` tracking for rotation lineage.
+
+**Why:**
+Verified by `tests/ui.spec.js` ("no token is persisted in web storage" and "a reload restores the session from the refresh cookie").
+Storing tokens in web storage exposes them to XSS exfiltration.
+
+**What I rejected:**
+Storing access tokens in `localStorage` or `sessionStorage`.
+
+**What would change my mind:**
+If the application had to run in a cross-origin multi-domain environment where `httpOnly` third-party cookies are blocked by modern browsers.
+
+---
+
+### 8. Enforcing session exclusivity via SQLite partial unique index
+
+**What I chose:**
+Exclusive active device sessions (control and terminal) are enforced via the schema partial index
+`idx_sessions_exclusive_active` on `(device_id)` where `ended_at IS NULL AND mode != 'view'`.
+Application logic catches SQLite constraint violations (`SQLITE_CONSTRAINT_UNIQUE`) and returns `409 Conflict` (`DEVICE_BUSY`).
+
+**Why:**
+Guarantees atomicity under concurrent requests. Application-level check-then-act (`SELECT` then `INSERT`) suffers from race
+conditions under parallel requests.
+
+**What I rejected:**
+In-process mutexes or application-level `SELECT count(*)` checks before insertion.
+
+**What would change my mind:**
+If session scheduling or queuing were introduced, requiring soft locks rather than immediate failure on concurrency.
+
+---
+
+### 9. Structural organization isolation: wrong org in route returns 404, not 403
+
+**What I chose:**
+In `server/context.js`, if a route contains an `:org` parameter that differs from the JWT's `claims.org`, the server throws
+`404 Not Found`.
+
+**Why:**
+Verified by `scripts/check-api.js` (§6 "cross-org is INVISIBLE, not forbidden — got 404, body carries no org data").
+Returning 403 reveals the existence of an organization to an unauthorized caller. 404 ensures the organization remains
+completely invisible.
+
+**What I rejected:**
+Returning `403 Forbidden` for cross-org requests.
+
+**What would change my mind:**
+If the API was designed for multi-tenant federation where organization names and IDs are public metadata.
 
 ---
 
 ## Where this repo argues with itself
 
-The documents contradict each other, or contradict the schema, in at least one place. Name each
-one you found. For each: quote both statements, say which you built against, and say why.
+1. **Suspension vs Token Freshness:**
+   - *Conflict:* `AUTH-DATA-MODEL.md §1` specifies that suspending a membership increments `perm_version`, which causes
+     `assertFresh` to reject requests with `401 TOKEN_STALE`. However, `AUTH-DATA-MODEL.md §10` and `PERMISSIONS.md §7` specify
+     that requests with a suspended membership's token must be refused with `403 Forbidden` (`reason: "suspended"`).
+   - *Resolution:* In `server/context.js`, we bypass `assertFresh` if `membership.status === 'suspended'`. The version bump
+     remains in place for eventual reinstatement, but the active request is allowed to reach the authorization engine where
+     it receives the intended 403 `suspended` response.
 
-Building against the written rule and arguing in writing is a **full-marks** answer. Silently
-working around it, or quietly picking one and saying nothing, scores zero on the section — we
-cannot tell the difference between a decision and an oversight.
+2. **Scope of `device:provision` on Decommission:**
+   - *Conflict:* The endpoint specification table lists `device:provision` as an un-scoped org-level permission, whereas
+     `UI-INVENTORY.md §3` categorizes `decommission-device` as a per-row device-scoped action.
+   - *Resolution:* We resolve `device:provision` against the specific device being decommissioned. An explicit deny on
+     `dev_01` prevents decommissioning `dev_01`, while leaving decommissioning authority intact for `dev_02`.
+
+---
 
 ## Deliberately not built
 
-What you chose not to build, and the reason. A scope cut with a stated reason is a senior
-judgement. An unmentioned gap is a gap.
+1. **Password reset & email delivery:**
+   Out of scope. User invitations return a raw token in the API response rather than dispatching SMTP emails.
+2. **Rate limiting:**
+   Omitted to ensure test suites can execute hundreds of rapid sequential and parallel requests without artificial throttling.
+3. **Audit log archival / rotation:**
+   The audit table is strictly append-only, enforced by SQLite triggers `trg_audit_no_update` and `trg_audit_no_delete`.
+   Automatic retention pruning was deliberately omitted to preserve forensic integrity.
