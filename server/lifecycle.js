@@ -1,91 +1,95 @@
-// Shared domain rules: role ranks, last-owner protection, ending sessions.
+// Shared domain helpers: role ranks, last-owner protection, session termination.
 //
-// TRAP 1: `roles.rank` is MODIFICATION AUTHORITY ONLY — it must NEVER answer a can()
-// question. operator and auditor are unordered by permission, and using rank to resolve
-// permissions is the exact bug the auditor role exists to catch.
-//
-// TRAP 2: a permission change does NOT end a session in flight (grandfathering).
-// Suspension, membership removal and device transfer DO cascade.
+// These are the rules from PERMISSIONS.md §7 and D8 that more than one route needs.
+// Keeping them here means there is one implementation of "what ends a session".
 
-import { randomUUID } from 'node:crypto';
-import { forbidden, badRequest, lastOwner as lastOwnerErr } from './http.js';
+import { newId, nowIso } from './db.js';
+import { badRequest, forbidden, lastOwner } from './http.js';
 
-// ---------------------------------------------------------------------------
-// Role rank helpers — for modification authority checks only.
-// ---------------------------------------------------------------------------
-
-// Returns a Map<roleName, rank> read fresh from the DB.
+// Modification authority ONLY (PERMISSIONS.md D8). This rank must NEVER be used to
+// answer a can() question — operator and auditor are unordered by permissions, and
+// ranking them is the exact modelling error the auditor role exists to catch.
 export function roleRanks(db) {
   const rows = db.prepare('SELECT key, rank FROM roles').all();
-  return new Map(rows.map(r => [r.key, r.rank]));
+  return Object.fromEntries(rows.map((r) => [r.key, r.rank]));
 }
 
-// Throw if the named role does not exist in the roles table.
 export function assertRoleExists(db, role) {
-  const row = db.prepare('SELECT key FROM roles WHERE key = ? LIMIT 1').get(role);
-  if (!row) throw badRequest(`unknown role: ${role}`);
+  const row = db.prepare('SELECT key FROM roles WHERE key = ?').get(role);
+  // An unknown role is a malformed request (400 VALIDATION), not a 409 conflict.
+  if (!row) throw badRequest(`unknown role: ${role}`, 'unknown_role');
 }
 
-// Throw if the caller's role rank does not dominate the target's role rank.
-// Lower rank value = higher in the hierarchy for modification authority.
-// A caller cannot modify someone of equal or higher rank than themselves.
+// You may modify a user only if your role outranks theirs. An owner may modify anyone,
+// including another owner.
 export function assertCanModify(db, callerRole, targetRole) {
+  if (callerRole === 'owner') return;
   const ranks = roleRanks(db);
-  const callerRank = ranks.get(callerRole) ?? Infinity;
-  const targetRank = ranks.get(targetRole) ?? Infinity;
-  if (callerRank >= targetRank) {
-    throw forbidden(
-      `your role (${callerRole}) cannot modify ${targetRole} — insufficient rank`,
-      'insufficient_rank'
-    );
-  }
+  if (ranks[callerRole] > ranks[targetRole]) return;
+  throw forbidden('you cannot modify a user at or above your own role', 'insufficient_rank');
 }
 
-// Throw if removing or demoting userId from orgId would leave no owner.
+// The org must always have at least one owner.
 export function assertNotLastOwner(db, orgId, userId) {
-  // Count active owners excluding the candidate user.
-  const { count } = db.prepare(`
-    SELECT COUNT(*) AS count FROM memberships
-     WHERE org_id = ? AND role = 'owner' AND status = 'active' AND user_id != ?
-  `).get(orgId, userId);
-  if (count === 0) throw lastOwnerErr();
+  const target = db.prepare('SELECT role FROM memberships WHERE org_id = ? AND user_id = ?').get(orgId, userId);
+  if (target?.role !== 'owner') return;
+
+  const owners = db.prepare(
+    `SELECT count(*) AS n FROM memberships
+      WHERE org_id = ? AND role = 'owner' AND status = 'active'`
+  ).get(orgId).n;
+
+  if (owners <= 1) throw lastOwner();
 }
 
-// ---------------------------------------------------------------------------
-// Session termination — the one implementation of "what ends a session".
-// Called for tenancy events (suspension, removal, device transfer), NOT for
-// permission or role changes (those are grandfathered).
-// ---------------------------------------------------------------------------
+// End every active session for a user in an org.
+//
+// NOTE what this is NOT used for: revoking a grant or changing a role. Sessions are
+// GRANDFATHERED — a permission change never terminates one in flight (PERMISSIONS.md
+// §7). It is used for account-integrity and tenancy events, which DO cascade.
+export function endActiveSessions(db, { orgId, userId, deviceId = null, reason, exceptSessionId = null }) {
+  const at = nowIso();
+  const where = [
+    'org_id = ?',
+    "state = 'active'",
+    userId ? 'user_id = ?' : null,
+    deviceId ? 'device_id = ?' : null,
+    exceptSessionId ? 'id != ?' : null,
+  ].filter(Boolean).join(' AND ');
 
-// End all active sessions that match the criteria.
-// Criteria: { orgId, userId?, deviceId?, reason, exceptSessionId? }
-export function endActiveSessions(db, { orgId, userId = null, deviceId = null, reason, exceptSessionId = null }) {
-  const at = new Date().toISOString();
-  const where = ['s.org_id = ?', "s.state = 'active'"];
-  const args = [orgId];
+  const params = [orgId];
+  if (userId) params.push(userId);
+  if (deviceId) params.push(deviceId);
+  if (exceptSessionId) params.push(exceptSessionId);
 
-  if (userId) { where.push('s.user_id = ?'); args.push(userId); }
-  if (deviceId) { where.push('s.device_id = ?'); args.push(deviceId); }
-  if (exceptSessionId) { where.push('s.id != ?'); args.push(exceptSessionId); }
+  const ids = db.prepare(`SELECT id FROM sessions WHERE ${where}`).all(...params).map((r) => r.id);
+  if (ids.length === 0) return [];
 
-  db.prepare(`
-    UPDATE sessions SET state = 'ended', end_reason = ?, ended_at = ?
-     WHERE ${where.join(' AND ')}
-  `).run(reason, at, ...args);
+  const stmt = db.prepare(`UPDATE sessions SET state='ended', ended_at=?, end_reason=? WHERE id=?`);
+  for (const id of ids) stmt.run(at, reason, id);
+  return ids;
 }
 
-// Snapshot the authority at session-start time.
-// Callers resolve permissions first and pass the result in.
-// Stored as the `authorized_by` JSON on the sessions row — this locks in the
-// authority at start time so permission changes don't retroactively affect running sessions.
-export function snapshotAuthority({ role, permissions }) {
-  return JSON.stringify({ role, permissions });
+// Snapshot of the authority that authorized a session. Because sessions are
+// grandfathered, THIS is the authority for the session's life — not the live
+// permission state. Storing it is what makes grandfathering legitimate.
+export function snapshotAuthority(db, { userId, orgId, deviceId }) {
+  const role = db.prepare('SELECT role FROM memberships WHERE org_id=? AND user_id=?').get(orgId, userId)?.role ?? null;
+  const at = nowIso();
+  const grantIds = db.prepare(
+    `SELECT g.id FROM grants g
+      WHERE g.user_id = ? AND g.org_id = ? AND g.revoked_at IS NULL
+        AND (g.starts_at IS NULL OR g.starts_at <= ?)
+        AND (g.expires_at IS NULL OR g.expires_at > ?)
+        AND (g.device_id IS NULL OR g.device_id = ?)`
+  ).all(userId, orgId, at, at, deviceId).map((r) => r.id);
+
+  return JSON.stringify({ role, grantIds, snapshotAt: at });
 }
 
-// Compute the session expiry timestamp for a new session.
-// Sessions last at most org.max_session_minutes.
 export function sessionExpiry(db, orgId) {
-  const org = db.prepare('SELECT max_session_minutes FROM organizations WHERE id = ? LIMIT 1').get(orgId);
-  const minutes = org?.max_session_minutes ?? 60;
-  return new Date(Date.now() + minutes * 60 * 1000).toISOString();
+  const minutes = db.prepare('SELECT max_session_minutes AS m FROM organizations WHERE id = ?').get(orgId)?.m ?? 60;
+  return new Date(Date.now() + minutes * 60_000).toISOString();
 }
+
+export { newId, nowIso };

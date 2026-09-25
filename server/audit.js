@@ -1,60 +1,51 @@
-// Append-only audit writes.
+// Audit helper.
 //
-// Two invariants:
-//   1. Denied attempts are recorded, not just successes.
-//   2. One action = one audit row, written in the same transaction as the change.
+// Two things candidates routinely get wrong, both enforced by the spec:
+//   - DENIED attempts are audited too, not just successes (invariant 10)
+//   - the audit table is append-only; there is no update or delete path
 //
-// The audit_events table has BEFORE UPDATE/DELETE triggers that make it physically
-// impossible to alter or delete rows — we only ever INSERT.
+// The DB trigger will reject any attempt to mutate a row, so this file only inserts.
 
-import { randomUUID } from 'node:crypto';
+import { newId, nowIso } from './db.js';
 
-// Write a single audit row. All fields come from server-side context — actorId is
-// always ctx.userId, never a client-supplied field.
 export function audit(db, {
   orgId,
-  actorId,
+  actorId = null,
   action,
   targetType = null,
   targetId = null,
-  result,          // 'allow' | 'deny'
+  result,
   reasonCode = null,
   requestId = null,
 }) {
-  db.prepare(`
-    INSERT INTO audit_events (id, org_id, actor_id, action, target_type, target_id,
-                              result, reason_code, request_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    randomUUID(),
-    orgId,
-    actorId ?? null,
-    action,
-    targetType,
-    targetId,
-    result,
-    reasonCode,
-    requestId,
+  db.prepare(
+    `INSERT INTO audit_events
+       (id, org_id, actor_id, action, target_type, target_id, result, reason_code, request_id, at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
+  ).run(
+    newId('aud'), orgId, actorId, action, targetType, targetId,
+    result, reasonCode, requestId, nowIso()
   );
 }
 
-// Run fn(); if it throws a permission error (403 FORBIDDEN), record the denial and
-// rethrow. Non-permission errors propagate without an audit row.
-export function auditDenials(db, ctx, { action, targetType = null, targetId = null }, fn) {
+// Wrap a permission-gated action so that a denial is recorded before it propagates.
+// Usage: auditDenials(db, ctx, {action, targetType, targetId}, () => { ...work... })
+//
+// Denials ONLY. The caller's success row is written by the route itself, inside the same
+// transaction as the change it describes; writing an `allow` here as well would log every
+// successful action twice (once without a target id, once with one).
+export function auditDenials(db, ctx, meta, fn) {
   try {
     return fn();
   } catch (err) {
-    if (err?.status === 403 || err?.code === 'FORBIDDEN' || err?.code === 'LAST_OWNER'
-        || err?.code === 'SELF_ROLE_CHANGE') {
+    if (err?.code === 'FORBIDDEN') {
       audit(db, {
         orgId: ctx.orgId,
         actorId: ctx.userId,
-        action,
-        targetType,
-        targetId,
         result: 'deny',
-        reasonCode: err.reason ?? null,
-        requestId: ctx.requestId ?? null,
+        reasonCode: err.reason ?? 'missing_permission',
+        requestId: ctx.requestId,
+        ...meta,
       });
     }
     throw err;

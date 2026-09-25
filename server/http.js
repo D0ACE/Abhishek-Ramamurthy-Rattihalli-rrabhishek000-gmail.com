@@ -1,9 +1,9 @@
 // HTTP helpers: the error type, body reading, and response writing.
 //
-// Every error response has the same shape (PERMISSIONS.md §10):
+// Every error response has the same shape (PERMISSIONS.md §5):
 //   { error: { code, message, reason, requestId } }
 // Keep it identical everywhere. The "doesn't exist" and "belongs to another org"
-// responses must be indistinguishable — see PERMISSIONS.md §6.
+// responses must be indistinguishable — see PERMISSIONS.md §5.
 
 export class HttpError extends Error {
   constructor(status, code, message, reason = null) {
