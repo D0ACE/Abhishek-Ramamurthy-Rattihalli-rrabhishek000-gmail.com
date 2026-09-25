@@ -173,6 +173,8 @@ Windows compatibility hardening:
 - Replaced `new URL(..., import.meta.url).pathname` with `fileURLToPath(new URL(..., import.meta.url))`
   in `server/index.js` and `scripts/load-db.js` to eliminate malformed leading slashes and drive duplication.
 - Ensured `npm run build` runs before production Playwright test execution.
+- Fixed `package.json` `db:reset` script: replaced Unix `rm -f ... && npm run db:load` with `node scripts/load-db.js`,
+  which uses Node's cross-platform `rmSync` to delete `.db`, `-wal`, and `-shm` files cleanly across both Windows and Unix.
 
 ## Open threads
 
