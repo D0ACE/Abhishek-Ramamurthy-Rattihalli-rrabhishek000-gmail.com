@@ -98,6 +98,18 @@ export function register(router, { db }) {
     send(res, 200, { members });
   });
 
+  // GET /v1/orgs/:org/roles — valid roles from database ordered by rank
+  router.get('/v1/orgs/:org/roles', (_ctx, _params, res) => {
+    const roles = db.prepare('SELECT key, label, rank FROM roles ORDER BY rank ASC').all();
+    send(res, 200, { roles: roles.map((r) => r.key), items: roles });
+  });
+
+  // GET /v1/roles — system-wide valid roles ordered by rank
+  router.get('/v1/roles', (_ctx, _params, res) => {
+    const roles = db.prepare('SELECT key, label, rank FROM roles ORDER BY rank ASC').all();
+    send(res, 200, { roles: roles.map((r) => r.key), items: roles });
+  });
+
   // Leave an org. Self-service, so no user:remove needed — but still cannot
   // orphan the org.
   router.delete('/v1/orgs/:org/members/me', (ctx, params, res) => {

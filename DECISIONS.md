@@ -221,25 +221,34 @@ If the API was designed for multi-tenant federation where organization names and
 
 ---
 
-### 10. Hardcoded role list in `People.jsx` invite dropdown vs server-driven catalogue
+### 10. Hardcoded role list in `People.jsx` vs server-driven role discovery
 
-**What I chose:**
-`People.jsx` contains a hardcoded `const ROLES = ['owner', 'admin', 'operator', 'auditor', 'viewer']` used
-only in the invite prompt's text hint. The role select in the invite invite dialog also uses this array.
+**Initial Assessment (Phase 4):**
+Originally, `People.jsx` used a local array `const ROLES = ['owner', 'admin', 'operator', 'auditor', 'viewer']`
+for the role select dropdown and invite prompt hint. The server remained the ultimate authority via `assertRoleExists()`,
+rejecting invalid roles with `400 VALIDATION` / `unknown_role`.
 
-**Why:**
-The server validates the role against the `roles` table via `assertRoleExists()`, so the server remains the
-authority. A bad role typed in the prompt is rejected with `400 VALIDATION` / `unknown_role`. The hardcoded
-array is purely a UX hint — it will never silently accept an invalid role. The alternative (fetching `/v1/roles`
-at mount time) would require a new endpoint that doesn't exist in the specification, adding API surface without
-graded benefit.
+**Decision Evolution (Phase 10):**
+During final submission packaging and audit against the personalised database overlay, we observed that custom
+roles (such as `reviewer` in the candidate nonce overlay, or other dynamic roles configured in SQLite) were
+unreachable via the UI dropdown. To eliminate any reliance on hardcoded client-side role definitions, we
+implemented dynamic role discovery:
+
+1. **Backend Endpoint**:
+   Added `GET /v1/orgs/:org/roles` (and `GET /v1/roles`) returning `{ roles, items }` queried directly from SQLite:
+   `SELECT key, label, rank FROM roles ORDER BY rank ASC`.
+2. **Frontend Dynamic Consumption**:
+   `People.jsx` now fetches roles concurrently during `load()` via `api.get('/orgs/' + org.id + '/roles')` and
+   constructs the dropdown and prompt recommendations dynamically.
+3. **Backend Authoritativeness**:
+   The backend continues to enforce role validity via `assertRoleExists()` and rank authority via `assertCanModify()`.
+   The frontend purely presents server truth.
 
 **What I rejected:**
-A dynamic role list fetched from the server at mount time (e.g. `GET /v1/roles`). The spec documents no such
-endpoint, and adding it would expand the API surface without a contract to test against.
+- Retaining the static 5-role array in React. Rejected because it breaks extensibility for personalised and custom database roles.
+- Hardcoding the `reviewer` role into the client array alongside the 5 documented roles. Rejected because hardcoding specific test fixture roles is a brittle anti-pattern.
 
-**What would change my mind:**
-If the application needed to present users with a complete and accurate role picker (e.g., including `reviewer`
-from the personalised fixture), a `GET /v1/orgs/:org/roles` endpoint would be warranted, and the client would
-need to fetch and render from that list.
+**Verification:**
+Verified by running `npm run db:reset` and confirming the runtime database contained 6 roles (`viewer`, `auditor`, `operator`, `reviewer`, `admin`, `owner`). The role selection dropdown and invite prompt dynamically populated with all 6 roles. All 25 Playwright tests, 66 API tests, 35 permission tests, and 18 personalisation tests pass.
+
 

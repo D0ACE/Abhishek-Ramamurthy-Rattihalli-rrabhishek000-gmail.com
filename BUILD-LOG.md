@@ -225,5 +225,41 @@ Windows compatibility hardening:
 **Observation on `People.jsx` ROLES array**: The hardcoded `ROLES` constant exists for UX convenience in the
 invite dropdown. It does not affect security — the server validates the role against the `roles` table via
 `assertRoleExists()`. A new role added to the DB does not appear in the dropdown without a frontend update.
-This is an acknowledged UX gap, not a security issue. See DECISIONS.md §2 note on "Deliberately not built."
+This was originally logged as an acknowledged UX gap; addressed in Phase 10 below.
+
+---
+
+### Phase 10 — Dynamic Roles & Final Candidate Packaging
+
+2026-09-26. Final submission preparation and dynamic role resolution implementation:
+
+1. **Discovery**:
+   The `People.jsx` component previously defined `const ROLES = ['owner', 'admin', 'operator', 'auditor', 'viewer']`.
+   While the server authoritative checks (`assertRoleExists`) already validated roles against SQLite, any undocumented
+   role loaded dynamically from the database (such as `reviewer` from the candidate nonce overlay) was absent from
+   the member role-change dropdown and the invite prompt recommendation.
+
+2. **Backend & Frontend Implementation**:
+   - Added `GET /v1/orgs/:org/roles` and `GET /v1/roles` endpoints to `server/routes/orgs.js`. These query `SELECT key, label, rank FROM roles ORDER BY rank ASC` directly from SQLite and return `{ roles: string[], items: Role[] }`.
+   - Updated `web/components/People.jsx`:
+     - Removed the static `ROLES` constant completely.
+     - Updated `load()` to fetch roles concurrently via `api.get('/orgs/' + org.id + '/roles')`.
+     - Derived `availableRoles` dynamically from the server response combined with active members, ensuring complete role coverage.
+     - Bound the role `<select>` and invite prompt to `availableRoles`.
+   - Verified that `reviewer` from the personalised overlay is automatically discovered and rendered.
+
+3. **Packaging & Candidate Spec Consolidation**:
+   - Consolidated candidate-facing specifications (`BRIEF.md`, `PERMISSIONS.md`, `AUTH-DATA-MODEL.md`, `UI-INVENTORY.md`, `WORKFLOW.md`) into the candidate repository root alongside `DISCOVERY-BRIEF.md`.
+   - Updated `README.md` to comprehensively document the single-process architecture, authentication and permission models, test execution instructions, and clean checkout instructions with zero placeholder tokens.
+   - Cleaned all build and test artifacts before packaging.
+
+4. **Verification**:
+   - `npm run build`: Production bundle created cleanly (39 modules, 252 kB bundle).
+   - `npm run db:reset`: Fresh database loaded with 3 orgs, 8 users, 20 permissions, 6 roles including `reviewer`.
+   - `node scripts/check-jwt.js`: 43/43 PASS
+   - `node scripts/check-permissions.js`: 35/35 PASS
+   - `node scripts/check-api.js`: 66/66 PASS
+   - `node scripts/check-personalisation.js`: 18/18 PASS
+   - `npx playwright test`: 25/25 PASS
+
 

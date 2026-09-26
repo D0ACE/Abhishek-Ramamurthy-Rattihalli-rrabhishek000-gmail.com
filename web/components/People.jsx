@@ -2,16 +2,22 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { api, isAllowed } from '../api.js';
 import Action from './Action.jsx';
 
-const ROLES = ['owner', 'admin', 'operator', 'auditor', 'viewer'];
-
 export default function People({ session, reload }) {
   const { org } = session;
   const [members, setMembers] = useState(null);
+  const [roles, setRoles] = useState([]);
   const [error, setError] = useState(null);
 
   const load = useCallback(async () => {
     try {
-      setMembers((await api.get(`/orgs/${org.id}/members`)).members);
+      const [membersRes, rolesRes] = await Promise.all([
+        api.get(`/orgs/${org.id}/members`),
+        api.get(`/orgs/${org.id}/roles`).catch(() => ({ roles: [] })),
+      ]);
+      setMembers(membersRes.members);
+      if (rolesRes && Array.isArray(rolesRes.roles) && rolesRes.roles.length > 0) {
+        setRoles(rolesRes.roles);
+      }
       setError(null);
     } catch (err) {
       setError(err.message);
@@ -31,6 +37,10 @@ export default function People({ session, reload }) {
     }
   }
 
+  // Derive available roles dynamically from server and current members (no hardcoded roles)
+  const memberRoles = members ? members.map((m) => m.role) : [];
+  const availableRoles = Array.from(new Set([...roles, ...memberRoles]));
+
   const setRole = (userId, role) => act(() => api.patch(`/orgs/${org.id}/members/${userId}`, { role }));
   const suspend = (userId) => act(() => api.post(`/orgs/${org.id}/members/${userId}/suspend`));
   const reinstate = (userId) => act(() => api.del(`/orgs/${org.id}/members/${userId}/suspend`));
@@ -39,7 +49,13 @@ export default function People({ session, reload }) {
   async function invite() {
     const email = prompt('Email to invite?');
     if (!email) return;
-    const role = prompt(`Role? one of ${ROLES.join(', ')}`, 'viewer');
+    const rolePrompt = availableRoles.length > 0
+      ? `Role? one of ${availableRoles.join(', ')}`
+      : 'Role?';
+    const defaultRole = availableRoles.includes('viewer')
+      ? 'viewer'
+      : (availableRoles[availableRoles.length - 1] || 'viewer');
+    const role = prompt(rolePrompt, defaultRole);
     if (!role) return;
     await act(async () => {
       const out = await api.post(`/orgs/${org.id}/invites`, { email, role });
@@ -88,7 +104,7 @@ export default function People({ session, reload }) {
                       data-state="unlocked"
                       onChange={(e) => setRole(m.id, e.target.value)}
                     >
-                      {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                      {availableRoles.map((r) => <option key={r} value={r}>{r}</option>)}
                     </select>
                   ) : (
                     <span data-testid="role-label" data-permission="user:role:update">{m.role}</span>
