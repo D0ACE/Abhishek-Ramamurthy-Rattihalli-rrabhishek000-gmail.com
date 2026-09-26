@@ -322,6 +322,26 @@ This was originally logged as an acknowledged UX gap; addressed in Phase 10 belo
    - `node scripts/check-jwt.js`: 43/43 PASS.
    - Verified that `null`, arrays, empty strings, and malformed characters in header or claims throw `401 UNAUTHENTICATED`.
 
+---
+
+### Phase 14 — Ungated Mutation Protection & Cookie Security Synchronization (A5)
+
+2026-09-26. Guarded non-permission authenticated mutations and aligned cookie specifications:
+
+1. **Diagnosis**:
+   `POST /v1/orgs` requires authentication but has no permission gate (`can()` is not called because organization creation is accessible to any valid user). However, `context.js` deliberately allows tokens of suspended memberships through with `membership.status === 'suspended'` so downstream permission endpoints can produce specific `403 forbidden / suspended` errors. Consequently, a user suspended in their current context was not blocked from creating new organizations.
+   In addition, `server/routes/auth.js` configured `HttpOnly; SameSite=Strict; Max-Age=30 days` without the `Secure` flag, while `README.md` previously described a 7-day Lax cookie.
+
+2. **Fix**:
+   - Implemented `assertActiveMembership(ctx)` in `server/lifecycle.js` which verifies that `ctx.membership.status !== 'suspended'`.
+   - Called `assertActiveMembership(ctx)` at the start of `POST /v1/orgs`, rejecting suspended users with `403 FORBIDDEN` / `suspended`.
+   - Updated `setRefreshCookie` in `server/routes/auth.js` to include the `Secure` attribute.
+   - Harmonized `README.md`, `BUILD-LOG.md`, and code to agree on `HttpOnly; Secure; SameSite=Strict; Path=/v1/auth; Max-Age=30 days`.
+
+3. **Verification**:
+   Verified that suspended members attempting `POST /v1/orgs` receive `403 FORBIDDEN` (`suspended`), while active members succeed with `201 CREATED`.
+
+
 
 
 

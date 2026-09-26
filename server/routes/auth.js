@@ -11,7 +11,7 @@ const REFRESH_COOKIE = 'rt';
 
 function setRefreshCookie(res, raw) {
   res.setHeader('set-cookie',
-    `${REFRESH_COOKIE}=${raw}; HttpOnly; SameSite=Strict; Path=/v1/auth; Max-Age=${REFRESH_TTL_SECONDS}`);
+    `${REFRESH_COOKIE}=${raw}; HttpOnly; Secure; SameSite=Strict; Path=/v1/auth; Max-Age=${REFRESH_TTL_SECONDS}`);
 }
 
 function readRefreshCookie(req) {

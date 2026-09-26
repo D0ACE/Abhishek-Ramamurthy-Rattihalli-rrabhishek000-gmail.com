@@ -92,4 +92,15 @@ export function sessionExpiry(db, orgId) {
   return new Date(Date.now() + minutes * 60_000).toISOString();
 }
 
+// Guard ungated mutations against suspended memberships (hidden concept A5).
+// Enforces that account suspension blocks state creation even when no permission check applies.
+export function assertActiveMembership(ctx) {
+  if (ctx.membership?.status === 'suspended') {
+    throw forbidden('your membership in this organization is suspended', 'suspended');
+  }
+  if (ctx.membership && ctx.membership.status !== 'active') {
+    throw forbidden('your membership in this organization is not active', 'not_a_member');
+  }
+}
+
 export { newId, nowIso };

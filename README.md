@@ -165,7 +165,7 @@ All 187 tests pass cleanly.
 
 - **Password Storage**: Passwords are saved as cryptographically salted hashes using `node:crypto` `scrypt` with random 16-byte salts.
 - **Access Tokens**: Short-lived (15 minutes) HMAC-SHA256 (HS256) JWT access tokens. Tokens are held **in memory only** by the frontend client and are never written to `localStorage` or `sessionStorage` (preventing persistent XSS token theft).
-- **Refresh Tokens**: Cryptographically random 32-byte hex tokens stored as hashes in the database with 7-day expiration. Refresh tokens are transmitted exclusively via `httpOnly`, `SameSite=Lax`, `Path=/v1/auth` cookies.
+- **Refresh Tokens**: Cryptographically random 32-byte hex tokens stored as hashes in the database with 30-day rotating expiration. Refresh tokens are transmitted exclusively via `httpOnly`, `Secure`, `SameSite=Strict`, `Path=/v1/auth` cookies. Token family replay detection revokes the entire token family upon reused token presentation.
 - **Timing Safe Validation**: Signature comparison uses `timingSafeEqual` to eliminate timing side-channel attacks.
 
 ### Authorization & Permission Engine

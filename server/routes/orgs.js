@@ -3,7 +3,7 @@ import { send, badRequest, notFound, conflict, forbidden, selfRoleChange } from 
 import { assertCan, resolve } from '../permissions.js';
 import { audit, auditDenials } from '../audit.js';
 import {
-  assertCanModify, assertNotLastOwner, endActiveSessions, roleRanks, assertRoleExists,
+  assertCanModify, assertNotLastOwner, endActiveSessions, roleRanks, assertRoleExists, assertActiveMembership,
 } from '../lifecycle.js';
 
 // Pagination is part of the contract, so the boundaries are defined rather than left
@@ -45,6 +45,7 @@ export function register(router, { db }) {
 
   // POST /v1/orgs — create an org. The creator becomes its owner.
   router.post('/v1/orgs', (ctx, _p, res) => {
+    assertActiveMembership(ctx);
     const name = String(ctx.body.name ?? '').trim();
     if (name.length < 1 || name.length > 200) throw badRequest('name must be 1-200 characters');
 
