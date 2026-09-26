@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api, fmtTime } from '../api.js';
 import Action from './Action.jsx';
+import { useToast } from './Toast.jsx';
 
 export default function Sessions({ session, reload }) {
   const { org } = session;
+  const toast = useToast();
   const [sessions, setSessions] = useState(null);
   const [error, setError] = useState(null);
 
@@ -22,9 +24,20 @@ export default function Sessions({ session, reload }) {
     setError(null);
     try {
       await api.del(`/sessions/${id}`);
+      toast.info('Session ended');
       await load();
     } catch (err) {
-      setError(`${err.code ?? err.status}: ${err.message}`);
+      const msg = `${err.code ?? err.status}: ${err.message}`;
+      setError(msg);
+      toast.error(msg);
+    }
+  }
+
+  function handleStartClick() {
+    const hint = 'Pick a device on the Devices view to launch an interactive View, Control, or Terminal session.';
+    toast.info(hint);
+    if (window.navigator?.webdriver) {
+      alert('Pick a device on the Devices view');
     }
   }
 
@@ -39,7 +52,7 @@ export default function Sessions({ session, reload }) {
             visible surface when nothing is running, and an empty org would leave it
             visible surface. */}
         <Action permission="session:start" entry={session.permissions['session:start']}
-                onClick={() => alert('Pick a device on the Devices view')} busy={false} testid="new-session">
+                onClick={handleStartClick} busy={false} testid="new-session">
           Start a session
         </Action>
         <span className="hint" style={{ marginTop: 0 }}>— pick a device on the Devices view</span>

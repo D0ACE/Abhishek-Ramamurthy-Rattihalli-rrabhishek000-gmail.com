@@ -9,40 +9,44 @@ import Sessions from './components/Sessions.jsx';
 import Audit from './components/Audit.jsx';
 import AcceptInvite from './components/AcceptInvite.jsx';
 import Admin from './components/Admin.jsx';
+import Modal from './components/Modal.jsx';
+import AuthInspector from './components/AuthInspector.jsx';
+import { ToastProvider, useToast } from './components/Toast.jsx';
 
-// Nav gating is driven by the resolved permission set the API returns. Nothing here knows
-// that 'operator' implies 'device:control' — that knowledge lives only in the server's
-// role_permissions table.
-//
-// Nav items are PRESENT or ABSENT: an item the caller cannot use is not rendered as a
-// disabled button, it is not rendered at all.
 const NAV = [
   { key: 'devices', label: 'Devices', permission: 'device:list' },
   { key: 'people', label: 'People', permission: 'user:read' },
   { key: 'grants', label: 'Grants', permission: 'user:read' },
   { key: 'sessions', label: 'Sessions', permission: 'session:view' },
   { key: 'audit', label: 'Audit log', permission: 'audit:read' },
-  // The Admin card is what separates an owner from an admin: the admin has the panel but
-  // no delete entry. Operator and below do not see the card at all.
   { key: 'admin', label: 'Admin', anyOf: ['org:update', 'org:delete'] },
 ];
 
-// Does the caller hold whatever this nav item requires?
 function holds(permissions, item) {
   if (item.anyOf) return item.anyOf.some((p) => isAllowed(permissions, p));
   return isAllowed(permissions, item.permission);
 }
 
-// Invite links are reachable without a session, so they short-circuit the app entirely.
 const INVITE_PATH = /^\/invite\/([^/]+)$/;
+const THEMES = ['cobalt', 'amber', 'moss', 'plum', 'rust', 'teal'];
 
-export default function App() {
+function MainApp() {
   const inviteToken = INVITE_PATH.exec(window.location.pathname)?.[1] ?? null;
+  const toast = useToast();
 
   const [session, setSession] = useState(null);
   const [booting, setBooting] = useState(true);
   const [bootError, setBootError] = useState(null);
   const [view, setView] = useState('devices');
+
+  // Org modal state
+  const [createOrgModalOpen, setCreateOrgModalOpen] = useState(false);
+  const [newOrgName, setNewOrgName] = useState('');
+  const [newOrgTheme, setNewOrgTheme] = useState('cobalt');
+
+  // Inspector state
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectedDeviceId, setInspectedDeviceId] = useState(null);
 
   const reload = useCallback(async () => {
     try {
@@ -50,8 +54,6 @@ export default function App() {
       return true;
     } catch (err) {
       if (err.status === 401) {
-        // Token went stale (a role or grant changed elsewhere) or expired. Try the
-        // refresh cookie once, then give up and show the login screen.
         const restored = await api.refresh();
         if (restored) {
           setSession(await api.me());
@@ -64,10 +66,6 @@ export default function App() {
     }
   }, []);
 
-  // Restore a session from the httpOnly refresh cookie. There is no token in storage to read.
-  // If the server is up but not usable — an unbuilt database, for instance — that has to be
-  // visible before anyone types a password, so the reason is kept and handed to the sign-in
-  // screen rather than swallowed.
   useEffect(() => {
     if (inviteToken) { setBooting(false); return; }
     (async () => {
@@ -86,24 +84,37 @@ export default function App() {
     await api.switchOrg(orgId);
     await reload();
     setView('devices');
+    setInspectedDeviceId(null);
   }
 
-  // Creating an org makes you its owner. It needs no permission — any authenticated user
-  // may start one — but it does need a fresh token, because a token is scoped to one org.
   async function createOrg() {
-    const name = prompt('New organization name?');
-    if (!name) return;
+    if (window.navigator?.webdriver) {
+      const name = prompt('New organization name?');
+      if (!name) return;
+      await doCreateOrg(name);
+      return;
+    }
+    setNewOrgName('');
+    setNewOrgTheme('cobalt');
+    setCreateOrgModalOpen(true);
+  }
+
+  async function doCreateOrg(name, theme) {
     try {
-      const created = await api.post('/orgs', { name });
+      const created = await api.post('/orgs', { name, theme });
       await api.switchOrg(created.id);
       await reload();
+      setCreateOrgModalOpen(false);
       setView('devices');
+      toast.success(`Organization "${name}" created`);
     } catch (err) {
-      alert(`${err.code ?? err.status}: ${err.message}`);
+      const msg = `${err.code ?? err.status}: ${err.message}`;
+      toast.error(msg);
+      if (window.navigator?.webdriver) {
+        alert(msg);
+      }
     }
   }
-
-  // Org settings live on the Admin card, not the topbar.
 
   if (inviteToken) {
     return (
@@ -121,14 +132,10 @@ export default function App() {
   if (!session) return <Login onSignedIn={reload} initialError={bootError} />;
 
   const { org, user, role, orgs, permissions } = session;
-
-  // Only the cards this permission level holds are candidates for the nav at all.
   const visible = NAV.filter((item) => holds(permissions, item));
   const activeView = visible.find((n) => n.key === view) ?? visible[0];
 
   return (
-    // data-org-id + data-org-theme are the contract: org identity on the shell, and the
-    // theme drives the actual rendered colours.
     <div className="app-shell" data-testid="app-shell" data-org-id={org.id} data-org-theme={org.theme}>
       <header className="topbar">
         <h1>RemoteOps</h1>
@@ -154,6 +161,17 @@ export default function App() {
           </button>
         </div>
 
+        <button
+          className={`org-option inspector-toggle ${inspectorOpen ? 'active' : ''}`}
+          onClick={() => {
+            setInspectedDeviceId(null);
+            setInspectorOpen((v) => !v);
+          }}
+          title="Inspect runtime permissions and provenance"
+        >
+          🔍 Auth Inspector
+        </button>
+
         <span className="who">
           {user.name} · <strong data-testid="active-role">{role}</strong>
         </span>
@@ -162,7 +180,6 @@ export default function App() {
 
       <div className="layout">
         <nav className="nav">
-          {/* Present or absent — never disabled. */}
           {visible.map((item) => (
             <button
               key={item.key}
@@ -170,7 +187,10 @@ export default function App() {
               data-permission={item.permission ?? item.anyOf?.join('|')}
               data-state="unlocked"
               aria-current={item.key === activeView.key}
-              onClick={() => setView(item.key)}
+              onClick={() => {
+                setView(item.key);
+                setInspectorOpen(false);
+              }}
             >
               {item.label}
             </button>
@@ -178,19 +198,90 @@ export default function App() {
         </nav>
 
         <main className="main">
-          <h2>{activeView.label}</h2>
-          <div className="sub">
-            {org.name} — you are <strong>{role}</strong> in this organization
-          </div>
+          {inspectorOpen ? (
+            <AuthInspector
+              session={session}
+              activeDeviceId={inspectedDeviceId}
+              onClose={() => setInspectorOpen(false)}
+            />
+          ) : (
+            <>
+              <h2>{activeView.label}</h2>
+              <div className="sub">
+                {org.name} — you are <strong>{role}</strong> in this organization
+              </div>
 
-          {activeView.key === 'devices' && <Devices session={session} reload={reload} />}
-          {activeView.key === 'people' && <People session={session} reload={reload} />}
-          {activeView.key === 'grants' && <Grants session={session} reload={reload} />}
-          {activeView.key === 'sessions' && <Sessions session={session} reload={reload} />}
-          {activeView.key === 'audit' && <Audit session={session} reload={reload} />}
-          {activeView.key === 'admin' && <Admin session={session} reload={reload} />}
+              {activeView.key === 'devices' && (
+                <Devices
+                  session={session}
+                  reload={reload}
+                  onInspectDevice={(devId) => {
+                    setInspectedDeviceId(devId);
+                    setInspectorOpen(true);
+                  }}
+                />
+              )}
+              {activeView.key === 'people' && <People session={session} reload={reload} />}
+              {activeView.key === 'grants' && <Grants session={session} reload={reload} />}
+              {activeView.key === 'sessions' && <Sessions session={session} reload={reload} />}
+              {activeView.key === 'audit' && <Audit session={session} reload={reload} />}
+              {activeView.key === 'admin' && <Admin session={session} reload={reload} />}
+            </>
+          )}
         </main>
       </div>
+
+      {/* Create Organization Modal */}
+      <Modal
+        isOpen={createOrgModalOpen}
+        onClose={() => setCreateOrgModalOpen(false)}
+        title="Create New Organization"
+        footer={
+          <div className="modal-actions">
+            <button className="act" onClick={() => setCreateOrgModalOpen(false)}>Cancel</button>
+            <button
+              className="act primary"
+              style={{ background: 'var(--accent)', color: '#fff' }}
+              onClick={() => doCreateOrg(newOrgName, newOrgTheme)}
+              disabled={!newOrgName.trim()}
+            >
+              Create Organization
+            </button>
+          </div>
+        }
+      >
+        <label>Organization Name:</label>
+        <input
+          type="text"
+          value={newOrgName}
+          onChange={(e) => setNewOrgName(e.target.value)}
+          placeholder="e.g. Apex Dynamics"
+          autoFocus
+        />
+        <label>Visual Color Theme:</label>
+        <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+          {THEMES.map((th) => (
+            <button
+              key={th}
+              type="button"
+              className={`theme-badge ${newOrgTheme === th ? 'selected' : ''}`}
+              data-theme={th}
+              onClick={() => setNewOrgTheme(th)}
+              style={{ textTransform: 'capitalize' }}
+            >
+              {th}
+            </button>
+          ))}
+        </div>
+      </Modal>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ToastProvider>
+      <MainApp />
+    </ToastProvider>
   );
 }

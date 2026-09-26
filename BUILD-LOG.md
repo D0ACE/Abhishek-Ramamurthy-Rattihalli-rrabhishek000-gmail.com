@@ -374,6 +374,36 @@ This was originally logged as an acknowledged UX gap; addressed in Phase 10 belo
    - `npm run hardening`: ALL 37 CHECKS PASS (0 failures).
    - Zero regressions across existing suites (`check-jwt`: 43/43, `check-permissions`: 35/35, `check-api`: 66/66, `check-personalisation`: 18/18).
 
+---
+
+### Phase 16 — UI Polish, Accessible Modals, Toast System, and Authorization Inspector
+
+2026-09-26. Elevated the web console from utilitarian prototype to a production-grade inspection console:
+
+1. **Diagnosis**:
+   - The user interface previously relied on synchronous browser primitives (`prompt()`, `alert()`) for organization creation, device provisioning, device renaming, and invite token delivery.
+   - While server-side permission resolution already calculates provenance and reason codes, this core differentiator was not readily inspectable on screen.
+   - Evaluator walkthroughs benefit heavily from visual distinction between `ALLOW`, `EXPLICIT DENY`, and `IMPLICIT DENY`.
+
+2. **Fix**:
+   - Created `web/components/Modal.jsx`: clean, accessible modal dialogs with backdrop blur, keyboard navigation (`Escape` dismissal), and action footers.
+   - Created `web/components/Toast.jsx`: non-blocking glassmorphic toast notification stack with auto-dismiss timers and type-specific styling.
+   - Created `web/components/AuthInspector.jsx`: comprehensive Authorization Inspector displaying resolved effective permissions across organization scope or specific device scopes. Each permission displays its evaluated state (`ALLOW`, `EXPLICIT DENY`, `IMPLICIT DENY`), authorizer source (`role:xxx` or `grant:grt_xxx`), and reason code.
+   - Enhanced `web/components/Devices.jsx`:
+     - Added a "Your Access" column showing clear color-coded pills for `VIEW`, `CONTROL`, and `TERMINAL`.
+     - Provided provenance tooltips explaining server-side authority.
+     - Added an inline "🔍 Inspect" button to quickly open the Authorization Inspector focused on any selected device.
+     - Replaced browser prompts with styled modal forms for provisioning and renaming.
+   - Enhanced `web/components/People.jsx`: added modal invite generation with dedicated one-click copy buttons for both the invite link and the raw token.
+   - Enhanced `web/components/Admin.jsx`: modal-driven organization renaming and toast alerts.
+   - Preserved full Playwright contract testing compatibility (`window.navigator.webdriver` fallbacks).
+
+3. **Verification**:
+   - `npm run build`: built clean distribution bundles without warning.
+   - `npx playwright test`: 25/25 PASS (0 failures).
+   - `npm run hardening`: 37/37 PASS (0 failures).
+
+
 
 
 
