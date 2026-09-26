@@ -57,10 +57,21 @@ export function register(router, { db }) {
       // people list can show pending invites without a second source of truth.
       const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
       if (user) {
-        db.prepare(
-          `INSERT INTO memberships (id,org_id,user_id,role,status,invited_by)
-           VALUES (?,?,?,?,'invited',?)`
-        ).run(newId('mem'), params.org, user.id, role, ctx.userId);
+        const mem = db.prepare('SELECT id, status FROM memberships WHERE org_id = ? AND user_id = ?').get(params.org, user.id);
+        if (mem) {
+          if (mem.status === 'removed') {
+            db.prepare(
+              "UPDATE memberships SET role = ?, status = 'invited', invited_by = ?, perm_version = perm_version + 1 WHERE id = ?"
+            ).run(role, ctx.userId, mem.id);
+          } else {
+            throw conflict('that email already has a membership in this org');
+          }
+        } else {
+          db.prepare(
+            `INSERT INTO memberships (id,org_id,user_id,role,status,invited_by)
+             VALUES (?,?,?,?,'invited',?)`
+          ).run(newId('mem'), params.org, user.id, role, ctx.userId);
+        }
       }
       audit(db, { orgId: ctx.orgId, actorId: ctx.userId, action: 'user.invite', targetType: 'email', targetId: email, result: 'allow', requestId: ctx.requestId });
     });

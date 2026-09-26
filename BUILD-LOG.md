@@ -262,4 +262,28 @@ This was originally logged as an acknowledged UX gap; addressed in Phase 10 belo
    - `node scripts/check-personalisation.js`: 18/18 PASS
    - `npx playwright test`: 25/25 PASS
 
+---
+
+### Phase 11 — Security Hardening: Removed-Member Rehire Flow (A1)
+
+2026-09-26. Identified and resolved hidden edge case A1 in member invitation lifecycle:
+
+1. **Diagnosis**:
+   When an existing user was removed from an organization, their `memberships` status was updated to `'removed'`,
+   retaining the record for audit attribution. If an admin subsequent invited that email address back into the organization,
+   `server/routes/invites.js` attempted an unconditional `INSERT INTO memberships (...)`. Because SQLite enforces
+   `UNIQUE (org_id, user_id)` on the `memberships` table, the insert crashed with `SQLITE_CONSTRAINT: UNIQUE constraint failed`.
+
+2. **Fix**:
+   Updated the invite creation transaction in `server/routes/invites.js`:
+   - If a membership record exists for `(org_id, user_id)`:
+     - If `status === 'removed'`, perform an `UPDATE memberships SET role = ?, status = 'invited', invited_by = ?, perm_version = perm_version + 1` instead of failing on unique constraint.
+     - If `status !== 'removed'`, report `409 CONFLICT` (already an active member or pending invite).
+   - If no record exists, perform the standard `INSERT INTO memberships (...)`.
+   - On invite redemption (`/accept`), the record transitions from `'invited'` to `'active'` smoothly, maintaining single-row invariant.
+
+3. **Verification**:
+   Tested rehire lifecycle: invite -> accept -> remove member -> re-invite same email -> accept. Verified that exactly one membership record exists and the user is restored to active status without constraint errors.
+
+
 
