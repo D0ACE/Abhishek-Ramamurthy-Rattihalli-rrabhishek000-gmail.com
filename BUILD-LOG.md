@@ -304,6 +304,25 @@ This was originally logged as an acknowledged UX gap; addressed in Phase 10 belo
 3. **Verification**:
    Validated that an operator with device-scoped `device:control` can grant on that specific device, but attempting an org-wide grant throws `403 FORBIDDEN` / `missing_permission`.
 
+---
+
+### Phase 13 — Authentication Hardening: Strict JWT Parsing & Fuzzing Defense (A6)
+
+2026-09-26. Hardened `verifyAccessToken` in `server/auth.js` against malformed objects and parser edge cases:
+
+1. **Diagnosis**:
+   While algorithm confusion (`alg: none`, `HS512`, `RS256`) and timing attacks were guarded against, `JSON.parse` returns primitives or arrays for inputs like `'null'` or `'[]'`. A JSON payload of `null` evaluates to `typeof null === 'object'`, leading to uncaught property access or type confusion. Furthermore, non-base64url characters were partially handled by Node's permissive base64url decoding.
+
+2. **Fix**:
+   - Added regex enforcement `BASE64URL_REGEX = /^[A-Za-z0-9_-]+$/` to all token segments before decoding.
+   - Added strict object validation: `header !== null && typeof header === 'object' && !Array.isArray(header)` and equivalent checks for claims.
+   - Enforced strict primitive contracts for required claims: `iss`, `aud`, `sub`, `org`, `role`, `jti` must be non-empty strings; `pv` must be an integer; `exp` must be a valid non-NaN number.
+
+3. **Verification**:
+   - `node scripts/check-jwt.js`: 43/43 PASS.
+   - Verified that `null`, arrays, empty strings, and malformed characters in header or claims throw `401 UNAUTHENTICATED`.
+
+
 
 
 

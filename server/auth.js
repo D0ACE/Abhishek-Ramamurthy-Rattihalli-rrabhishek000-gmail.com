@@ -70,16 +70,28 @@ export function issueAccessToken({ userId, orgId, role, permVersion }, secret) {
 // AUTH-DATA-MODEL.md §10 lists the failure modes; §2 defines the claim set.
 // `node scripts/check-jwt.js` is the public test suite for this function.
 // ---------------------------------------------------------------------------
+const BASE64URL_REGEX = /^[A-Za-z0-9_-]+$/;
+
 export function verifyAccessToken(token, secret) {
-  const parts = String(token ?? '').split('.');
+  if (typeof token !== 'string') throw unauthenticated('malformed token');
+  const parts = token.split('.');
   if (parts.length !== 3) throw unauthenticated('malformed token');
 
   const [h, p, s] = parts;
+
+  if (!h || !BASE64URL_REGEX.test(h)) throw unauthenticated('malformed token header');
+  if (!p || !BASE64URL_REGEX.test(p)) throw unauthenticated('malformed token payload');
+  if (s.length > 0 && !BASE64URL_REGEX.test(s)) throw unauthenticated('malformed token signature');
 
   let header;
   try {
     header = JSON.parse(unb64(h).toString('utf8'));
   } catch {
+    throw unauthenticated('malformed token header');
+  }
+
+  // Header must be a plain non-null, non-array object
+  if (header === null || typeof header !== 'object' || Array.isArray(header)) {
     throw unauthenticated('malformed token header');
   }
 
@@ -102,10 +114,36 @@ export function verifyAccessToken(token, secret) {
     throw unauthenticated('malformed token payload');
   }
 
+  // Claims must be a plain non-null, non-array object
+  if (claims === null || typeof claims !== 'object' || Array.isArray(claims)) {
+    throw unauthenticated('malformed token payload');
+  }
+
   const now = Math.floor(Date.now() / 1000);
-  if (typeof claims.exp !== 'number' || claims.exp <= now) throw unauthenticated('token expired');
-  if (claims.iss !== ISS || claims.aud !== AUD) throw unauthenticated('bad token issuer or audience');
-  if (!claims.jti) throw unauthenticated('token has no jti');
+  if (typeof claims.exp !== 'number' || Number.isNaN(claims.exp) || claims.exp <= now) {
+    throw unauthenticated('token expired');
+  }
+  if (typeof claims.iss !== 'string' || claims.iss !== ISS || typeof claims.aud !== 'string' || claims.aud !== AUD) {
+    throw unauthenticated('bad token issuer or audience');
+  }
+  if (typeof claims.jti !== 'string' || claims.jti.trim() === '') {
+    throw unauthenticated('token has no jti');
+  }
+  if (typeof claims.sub !== 'string' || claims.sub.trim() === '') {
+    throw unauthenticated('token has no sub');
+  }
+  if (typeof claims.org !== 'string' || claims.org.trim() === '') {
+    throw unauthenticated('token has no org');
+  }
+  if (typeof claims.role !== 'string' || claims.role.trim() === '') {
+    throw unauthenticated('token has no role');
+  }
+  if (typeof claims.pv !== 'number' || !Number.isInteger(claims.pv)) {
+    throw unauthenticated('token has invalid pv');
+  }
+  if (claims.iat !== undefined && (typeof claims.iat !== 'number' || Number.isNaN(claims.iat))) {
+    throw unauthenticated('token has invalid iat');
+  }
 
   return claims;
 }
