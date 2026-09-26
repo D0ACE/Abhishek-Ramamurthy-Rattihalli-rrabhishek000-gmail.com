@@ -341,6 +341,40 @@ This was originally logged as an acknowledged UX gap; addressed in Phase 10 belo
 3. **Verification**:
    Verified that suspended members attempting `POST /v1/orgs` receive `403 FORBIDDEN` (`suspended`), while active members succeed with `201 CREATED`.
 
+---
+
+### Phase 15 — Concurrency Race Safety & Comprehensive Security Hardening Suite
+
+2026-09-26. Enforced database-level transaction guarantees for administrative mutations and implemented an automated security hardening verification suite:
+
+1. **Diagnosis**:
+   - Administrative mutations (`PATCH /orgs/:org/members/:user`, `DELETE /orgs/:org/members/:user`, `POST /suspend`) previously evaluated `assertNotLastOwner()` prior to initiating the transaction. Under concurrent requests (e.g. Owner A demoting Owner B while Owner B simultaneously demotes Owner A), read-then-write interleaving could allow both transactions to succeed, leaving zero active owners.
+   - While existing test suites thoroughly validated baseline permissions (35 checks), JWT rules (43 checks), API endpoints (66 checks), and nonces (18 checks), critical organizer-rubric edge cases (A1, A3, A5, A6, time boundaries, lifecycle cascades, concurrent control sessions) needed a consolidated automated regression suite.
+
+2. **Fix**:
+   - Moved target existence and last-owner assertions directly inside `db.transaction()` blocks across `server/routes/orgs.js`.
+   - Added an immediate post-mutation invariant check within the transaction: `SELECT count(*) AS n FROM memberships WHERE org_id = ? AND role = 'owner' AND status = 'active'`. If `n < 1`, the transaction throws `lastOwner()`, causing an automatic rollback.
+   - Implemented `scripts/check-hardening.js` testing 18 discrete security vectors (37 total assertions):
+     - `01`: Member rehire after removal succeeds with `status = 'invited'` / `role` update and leaves exactly 1 membership row without unique constraint failure.
+     - `02`: Device-scoped privilege laundering prevention (user with device allow cannot grant permission org-wide).
+     - `03`: Device-scoped grant authority (caller cannot confer permissions they lack on the target device).
+     - `04`: Suspended user blocked from `POST /v1/orgs` via `assertActiveMembership()`.
+     - `05-08`: JWT parser fuzzing: non-JSON headers, `null` header JSON, `null` claims JSON, and non-base64url characters rejected with `401 UNAUTHENTICATED`.
+     - `09`: Concurrency test simulating simultaneous mutual owner demotions, verifying at least one active owner survives in the database, and sole-owner deletion fails with `LAST_OWNER`.
+     - `10-11`: Grant boundary handling: `expires_at <= now` is inert; `starts_at > now` is inert.
+     - `12`: Unconditional org-wide deny override over device-scoped allow.
+     - `13`: Device transfer cascades to active session termination (`end_reason = 'device_transferred'`).
+     - `14`: Account suspension cascades to active session termination (`end_reason = 'user_suspended'`).
+     - `15`: Role demotion preserves active in-flight session (grandfathering principle).
+     - `16-17`: Tenant isolation: cross-org IDs and soft-deleted resources return `404 NOT_FOUND` without leaking metadata.
+     - `18`: Exclusive device session constraint rejects concurrent control sessions with `409 CONFLICT` (`DEVICE_BUSY`).
+   - Added `"hardening": "node scripts/check-hardening.js"` script to `package.json`.
+
+3. **Verification**:
+   - `npm run hardening`: ALL 37 CHECKS PASS (0 failures).
+   - Zero regressions across existing suites (`check-jwt`: 43/43, `check-permissions`: 35/35, `check-api`: 66/66, `check-personalisation`: 18/18).
+
+
 
 
 

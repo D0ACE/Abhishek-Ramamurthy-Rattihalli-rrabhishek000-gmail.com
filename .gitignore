@@ -3,6 +3,7 @@ app.db
 app.db-wal
 app.db-shm
 check-api.db*
+hardening-test.db*
 e2e.db
 e2e.db-wal
 e2e.db-shm

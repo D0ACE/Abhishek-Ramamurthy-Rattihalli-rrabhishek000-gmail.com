@@ -1,5 +1,5 @@
 import { newId, nowIso, bumpPermVersion } from '../db.js';
-import { send, badRequest, notFound, conflict, forbidden, selfRoleChange } from '../http.js';
+import { send, badRequest, notFound, conflict, forbidden, selfRoleChange, lastOwner } from '../http.js';
 import { assertCan, resolve } from '../permissions.js';
 import { audit, auditDenials } from '../audit.js';
 import {
@@ -138,10 +138,18 @@ export function register(router, { db }) {
     if (role === 'owner' && ctx.role !== 'owner') {
       throw forbidden('only an owner may assign the owner role', 'cannot_confer_owner');
     }
-    if (target.role === 'owner' && role !== 'owner') assertNotLastOwner(db, params.org, userId);
 
     const tx = db.transaction(() => {
+      const current = db.prepare('SELECT role, status FROM memberships WHERE org_id=? AND user_id=?').get(params.org, userId);
+      if (!current || current.status === 'removed') throw notFound();
+      if (current.role === 'owner' && role !== 'owner') assertNotLastOwner(db, params.org, userId);
+
       db.prepare('UPDATE memberships SET role = ? WHERE org_id=? AND user_id=?').run(role, params.org, userId);
+      const remainingOwners = db.prepare(
+        "SELECT count(*) AS n FROM memberships WHERE org_id = ? AND role = 'owner' AND status = 'active'"
+      ).get(params.org).n;
+      if (remainingOwners < 1) throw lastOwner();
+
       bumpPermVersion(db, { orgId: params.org, userId });
       audit(db, { orgId: ctx.orgId, actorId: ctx.userId, action: 'user.role.update', targetType: 'user', targetId: userId, result: 'allow', requestId: ctx.requestId });
     });
@@ -211,11 +219,19 @@ function setMembershipStatus(db, ctx, orgId, userId, status, action) {
 
   const target = db.prepare('SELECT * FROM memberships WHERE org_id=? AND user_id=?').get(orgId, userId);
   if (!target || target.status === 'removed') throw notFound();
-  if (target.role === 'owner' && status !== 'active') assertNotLastOwner(db, orgId, userId);
   assertCanModify(db, ctx.role, target.role);
 
   const tx = db.transaction(() => {
+    const current = db.prepare('SELECT role, status FROM memberships WHERE org_id=? AND user_id=?').get(orgId, userId);
+    if (!current || current.status === 'removed') throw notFound();
+    if (current.role === 'owner' && status !== 'active') assertNotLastOwner(db, orgId, userId);
+
     db.prepare('UPDATE memberships SET status = ? WHERE org_id=? AND user_id=?').run(status, orgId, userId);
+    const remainingOwners = db.prepare(
+      "SELECT count(*) AS n FROM memberships WHERE org_id = ? AND role = 'owner' AND status = 'active'"
+    ).get(orgId).n;
+    if (remainingOwners < 1) throw lastOwner();
+
     bumpPermVersion(db, { orgId, userId });
     // Suspension DOES cascade: account integrity, not a permission tweak (§7.2).
     if (status !== 'active') endActiveSessions(db, { orgId, userId, reason: 'user_suspended' });
@@ -233,13 +249,21 @@ function removeMembership(db, ctx, orgId, userId, action) {
 
   const target = db.prepare('SELECT * FROM memberships WHERE org_id=? AND user_id=?').get(orgId, userId);
   if (!target || target.status === 'removed') throw notFound();
-  if (target.role === 'owner') assertNotLastOwner(db, orgId, userId);
   if (userId !== ctx.userId) assertCanModify(db, ctx.role, target.role);
 
   const tx = db.transaction(() => {
+    const current = db.prepare('SELECT role, status FROM memberships WHERE org_id=? AND user_id=?').get(orgId, userId);
+    if (!current || current.status === 'removed') throw notFound();
+    if (current.role === 'owner') assertNotLastOwner(db, orgId, userId);
+
     // The membership is removed. The USER ROW IS NEVER DELETED (D15) — they may belong
     // to other orgs, and their audit history must survive.
     db.prepare("UPDATE memberships SET status='removed' WHERE org_id=? AND user_id=?").run(orgId, userId);
+    const remainingOwners = db.prepare(
+      "SELECT count(*) AS n FROM memberships WHERE org_id = ? AND role = 'owner' AND status = 'active'"
+    ).get(orgId).n;
+    if (remainingOwners < 1) throw lastOwner();
+
     bumpPermVersion(db, { orgId, userId });
     endActiveSessions(db, { orgId, userId, reason: 'membership_removed' });
     audit(db, { orgId, actorId: ctx.userId, action, targetType: 'user', targetId: userId, result: 'allow', requestId: ctx.requestId });
