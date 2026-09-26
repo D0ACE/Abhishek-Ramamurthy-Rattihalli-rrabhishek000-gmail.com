@@ -126,7 +126,7 @@ export function verifyAccessToken(token, secret) {
   if (typeof claims.iss !== 'string' || claims.iss !== ISS || typeof claims.aud !== 'string' || claims.aud !== AUD) {
     throw unauthenticated('bad token issuer or audience');
   }
-  if (typeof claims.jti !== 'string' || claims.jti.trim() === '') {
+  if (typeof claims.jti !== 'string' || claims.jti.length === 0 || claims.jti.trim() === '') {
     throw unauthenticated('token has no jti');
   }
   if (typeof claims.sub !== 'string' || claims.sub.trim() === '') {

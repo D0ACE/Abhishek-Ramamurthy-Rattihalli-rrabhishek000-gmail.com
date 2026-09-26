@@ -136,26 +136,32 @@ The application is served at `http://localhost:8080`.
 
 ## Verification & Test Commands
 
-Every component has been verified against the test suites:
+Run the single canonical verification command to execute all test suites and production build:
 
 ```sh
-# 1. JWT verification test suite (43 tests)
-node scripts/check-jwt.js
-
-# 2. Permission resolution engine test suite (35 tests)
-node scripts/check-permissions.js
-
-# 3. HTTP API contract test suite (66 tests)
-node scripts/check-api.js
-
-# 4. Personalisation overlay test suite (18 tests)
-node scripts/check-personalisation.js
-
-# 5. Playwright E2E UI presence test suite (25 tests)
-npx playwright test
+npm run verify
 ```
 
-All 187 tests pass cleanly.
+This runs the complete test portfolio in sequence:
+- ✓ **Production Build**: compiles the Vite + React SPA bundle
+- ✓ **JWT Verification**: `node scripts/check-jwt.js` (43 checks)
+- ✓ **Permission Engine**: `node scripts/check-permissions.js` (35 checks)
+- ✓ **HTTP API & Scoping**: `node scripts/check-api.js` (66 checks)
+- ✓ **Personalisation Overlay**: `node scripts/check-personalisation.js` (18 checks)
+- ✓ **Security Hardening**: `node scripts/check-hardening.js` (37 checks)
+- ✓ **Playwright E2E**: `npx playwright test` (25 browser tests)
+
+**Total: 224 automated checks passing with 0 failures.**
+
+Individual suites can also be run directly:
+```sh
+npm run hardening        # 37 security & race-safety tests
+npm test                 # 25 Playwright browser tests
+node scripts/check-jwt.js # 43 JWT cryptography & parser checks
+node scripts/check-permissions.js # 35 permission resolution checks
+node scripts/check-api.js # 66 HTTP API checks
+node scripts/check-personalisation.js # 18 dynamic database checks
+```
 
 ---
 

@@ -96,10 +96,10 @@ export function sessionExpiry(db, orgId) {
 // Enforces that account suspension blocks state creation even when no permission check applies.
 export function assertActiveMembership(ctx) {
   if (ctx.membership?.status === 'suspended') {
-    throw forbidden('your membership in this organization is suspended', 'suspended');
+    throw forbidden('membership is suspended', 'suspended');
   }
-  if (ctx.membership && ctx.membership.status !== 'active') {
-    throw forbidden('your membership in this organization is not active', 'not_a_member');
+  if (ctx.membership?.status !== 'active') {
+    throw forbidden('membership is not active', 'not_a_member');
   }
 }
 

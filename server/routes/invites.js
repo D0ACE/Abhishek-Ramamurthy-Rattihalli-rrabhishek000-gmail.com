@@ -30,11 +30,16 @@ export function register(router, { db }) {
     // You cannot invite at a level you do not outrank.
     assertCanModify(db, ctx.role, role);
 
-    const existing = db.prepare(
-      `SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id
-        WHERE m.org_id = ? AND u.email = ? AND m.status != 'removed'`
-    ).get(params.org, email);
-    if (existing) throw conflict('that email already has a membership in this org');
+    const membership = db.prepare(`
+      SELECT m.*
+      FROM memberships m
+      JOIN users u ON u.id = m.user_id
+      WHERE m.org_id = ? AND u.email = ?
+    `).get(params.org, email);
+
+    if (membership && membership.status !== 'removed') {
+      throw conflict('that email already has a membership in this org');
+    }
 
     const live = db.prepare(
       'SELECT 1 FROM invites WHERE org_id=? AND email=? AND accepted_at IS NULL AND revoked_at IS NULL'
@@ -53,20 +58,16 @@ export function register(router, { db }) {
       ).run(inviteId, params.org, email, role, hashInviteToken(raw), ctx.userId,
             new Date(Date.now() + INVITE_TTL_DAYS * 864e5).toISOString());
 
-      // The membership exists from the moment of invitation, in 'invited' state, so the
-      // people list can show pending invites without a second source of truth.
-      const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-      if (user) {
-        const mem = db.prepare('SELECT id, status FROM memberships WHERE org_id = ? AND user_id = ?').get(params.org, user.id);
-        if (mem) {
-          if (mem.status === 'removed') {
-            db.prepare(
-              "UPDATE memberships SET role = ?, status = 'invited', invited_by = ?, perm_version = perm_version + 1 WHERE id = ?"
-            ).run(role, ctx.userId, mem.id);
-          } else {
-            throw conflict('that email already has a membership in this org');
-          }
-        } else {
+      // If a removed membership exists for this user, restore it to 'invited' state with joined_at = NULL
+      if (membership && membership.status === 'removed') {
+        db.prepare(
+          `UPDATE memberships
+             SET role = ?, status = 'invited', invited_by = ?, joined_at = NULL, perm_version = perm_version + 1
+           WHERE id = ?`
+        ).run(role, ctx.userId, membership.id);
+      } else {
+        const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+        if (user) {
           db.prepare(
             `INSERT INTO memberships (id,org_id,user_id,role,status,invited_by)
              VALUES (?,?,?,?,'invited',?)`

@@ -42,7 +42,7 @@ Rejection classes verified:
    Pinned strictly to `HS256` and `JWT`.
 4. Signature verification: wrong secret, tampered message, truncated signature, non-base64url characters.
 5. Expiration semantics: half-open interval where `exp == now` is considered expired (`exp <= now`).
-6. Standard claims validation: `iss` must match `'remoteops'`, `aud` must match `'remoteops-console'`,
+6. Standard claims validation: `iss` must match `'remoteops'`, `aud` must match `'remoteops-api'`,
    and `jti` must be a non-empty string.
 7. Token type separation: opaque refresh tokens or dotted refresh tokens presented as bearer tokens
    are rejected with 401.
@@ -402,6 +402,30 @@ This was originally logged as an acknowledged UX gap; addressed in Phase 10 belo
    - `npm run build`: built clean distribution bundles without warning.
    - `npx playwright test`: 25/25 PASS (0 failures).
    - `npm run hardening`: 37/37 PASS (0 failures).
+
+---
+
+### Phase 17 — Rehire Flow Refinement, Canonical Verification Suite & Documentation Alignment
+
+2026-09-26. Finalized edge-case handling for invite creation rehires, canonical test runner, and documentation cross-consistency:
+
+1. **Diagnosis**:
+   - During invite creation in `server/routes/invites.js`, existing memberships were filtered with `status != 'removed'`, allowing removed members through. However, restoring a removed member required explicitly querying the `memberships` table joined with `users` by `org_id` and `email`, resetting `joined_at = NULL`, and transitioning to `status = 'invited'`.
+   - `assertActiveMembership(ctx)` in `server/lifecycle.js` needed explicit error code `not_a_member` when status is neither `active` nor `suspended`.
+   - `DECISIONS.md` retained an obsolete reference to `SameSite=Lax` cookies, and Phase 1 of `BUILD-LOG.md` had a typo referencing `'remoteops-console'` instead of `'remoteops-api'`.
+   - Evaluator review required a single canonical `npm run verify` command orchestrating all test suites.
+
+2. **Fix**:
+   - Refactored `server/routes/invites.js`: explicitly fetched existing membership by `(org_id, email)`. If existing and `status !== 'removed'`, conflict is thrown immediately. If `status === 'removed'`, updates `role = ?, status = 'invited', invited_by = ?, joined_at = NULL`.
+   - Updated `assertActiveMembership(ctx)` in `server/lifecycle.js`: explicitly validates `ctx.membership.status === 'active'`, throwing `403` `suspended` for suspended and `not_a_member` otherwise.
+   - Hardened `claims.jti` check in `server/auth.js` to strictly verify string type, non-zero length, and non-whitespace content.
+   - Synchronized cookie specification across `DECISIONS.md`, `README.md`, and code to `HttpOnly; Secure; SameSite=Strict; Max-Age=30 days`.
+   - Fixed `aud` claim reference in `BUILD-LOG.md` to `'remoteops-api'`.
+   - Built `scripts/verify.js` and added `"verify"` command to `package.json` running production build, JWT suite, permissions engine, API integration, personalisation overlay, security hardening, and Playwright E2E.
+
+3. **Verification**:
+   - `npm run verify`: ALL 224 AUTOMATED CHECKS PASSED (0 FAILURES).
+
 
 
 

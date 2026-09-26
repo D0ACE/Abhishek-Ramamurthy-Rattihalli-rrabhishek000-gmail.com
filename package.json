@@ -14,6 +14,7 @@
     "test:ui": "playwright test --ui",
     "personalisation": "node scripts/check-personalisation.js",
     "hardening": "node scripts/check-hardening.js",
+    "verify": "node scripts/verify.js",
     "fingerprint": "node scripts/personalise.js"
   },
   "dependencies": {

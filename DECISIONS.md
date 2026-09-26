@@ -138,7 +138,7 @@ themselves do not possess.
 
 **What I chose:**
 Access tokens are short-lived JWTs held strictly in application memory (never written to `localStorage` or `sessionStorage`).
-Refresh tokens are opaque UUIDs stored in `httpOnly`, `SameSite=Lax` cookies, backed by hashed database records with
+Refresh tokens are opaque UUIDs stored in `HttpOnly`, `Secure`, `SameSite=Strict` cookies with a 30-day lifetime (`Max-Age=2592000`), backed by hashed database records with
 `family_id` tracking for rotation lineage.
 
 **Why:**
