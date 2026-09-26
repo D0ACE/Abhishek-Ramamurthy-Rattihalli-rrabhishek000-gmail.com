@@ -426,6 +426,40 @@ This was originally logged as an acknowledged UX gap; addressed in Phase 10 belo
 3. **Verification**:
    - `npm run verify`: ALL 224 AUTOMATED CHECKS PASSED (0 FAILURES).
 
+---
+
+### Phase 18 — Comprehensive Hardening of JWT Parser, Member Leave Gating & Complete Invite Revocation/Acceptance Lifecycle
+
+2026-09-26. Addressed evaluator feedback on edge-case robustness across authentication, rehire lifecycle, and ungated mutations:
+
+1. **Diagnosis**:
+   - `server/auth.js`: The JWT parser verification needed to strictly check non-empty signature segments before cryptographic verification, validate `Number.isFinite` on numeric timestamp claims (`exp`, `iat`), reject non-positive permission versions, and enforce optional `nbf` (not-before) constraints against future token activation.
+   - `server/routes/orgs.js`: While `POST /v1/orgs` was protected with `assertActiveMembership(ctx)`, `DELETE /v1/orgs/:org/members/me` (self-service leave) was another ungated mutation route that a suspended user could theoretically execute without going through the permission engine.
+   - `server/routes/invites.js`: The invite revocation path (`DELETE /v1/orgs/:org/invites/:id`) needed to distinguish between revoking a first-time invite (deleting the pending membership row) and revoking a re-invite for a previously removed member (reverting their status back to `status='removed'` with a bumped `perm_version` to prevent data loss or duplicate constraint failures).
+   - Furthermore, the acceptance handler in `server/routes/invites.js` was streamlined to ensure any existing membership row (invited or rehire) is updated in place to `active`, rather than branching across non-removed states.
+
+2. **Fix**:
+   - Hardened `verifyAccessToken` in `server/auth.js`:
+     - Explicit check `!s || !BASE64URL_REGEX.test(s)` ensures empty signatures fail fast as malformed token signature before HMAC computation.
+     - `!Number.isFinite(claims.exp)` protects against `Infinity` bypassing expiry checks.
+     - Enforced `Number.isInteger(claims.pv) && claims.pv >= 0`.
+     - Validated optional `claims.iat` and `claims.nbf` using `Number.isFinite`.
+   - Protected `DELETE /v1/orgs/:org/members/me` in `server/routes/orgs.js` with `assertActiveMembership(ctx)`, ensuring suspended users cannot perform any ungated state mutations.
+   - Enhanced `server/routes/invites.js`:
+     - Revocation checks whether the pending membership had previous history (`joined_at !== null || perm_version > 1`); if so, transitions to `'removed'` rather than hard-deleting the historical row.
+     - Accept handler atomically transitions any existing membership row directly to `status='active'` with updated role and bumped permission version.
+
+3. **Verification**:
+   - Canonical `node scripts/verify.js` executed all suites:
+     - JWT Cryptography & Parser: 43/43 PASS.
+     - Permission Engine & Scopes: 35/35 PASS.
+     - API Scoping & Invariants: 66/66 PASS.
+     - Dynamic Personalisation: 18/18 PASS.
+     - Security Hardening & Concurrency: 37/37 PASS.
+     - Playwright E2E Browser Suite: 25/25 PASS.
+   - Total: 224/224 automated checks passed (0 failures).
+
+
 
 
 

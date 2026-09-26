@@ -107,8 +107,16 @@ export function register(router, { db }) {
     if (invite.accepted_at) throw conflict('invite was already accepted; remove the member instead');
 
     db.prepare('UPDATE invites SET revoked_at=? WHERE id=?').run(nowIso(), params.id);
-    db.prepare("DELETE FROM memberships WHERE org_id=? AND user_id=(SELECT id FROM users WHERE email=?) AND status='invited'")
-      .run(params.org, invite.email);
+    const targetMem = db.prepare(
+      "SELECT id, joined_at, perm_version FROM memberships WHERE org_id=? AND user_id=(SELECT id FROM users WHERE email=?) AND status='invited'"
+    ).get(params.org, invite.email);
+    if (targetMem) {
+      if (targetMem.joined_at !== null || targetMem.perm_version > 1) {
+        db.prepare("UPDATE memberships SET status='removed', perm_version = perm_version + 1 WHERE id=?").run(targetMem.id);
+      } else {
+        db.prepare("DELETE FROM memberships WHERE id=?").run(targetMem.id);
+      }
+    }
     audit(db, { orgId: ctx.orgId, actorId: ctx.userId, action: 'user.invite.revoke', targetType: 'invite', targetId: params.id, result: 'allow', requestId: ctx.requestId });
     send(res, 204, undefined);
   });
@@ -157,12 +165,8 @@ export function register(router, { db }) {
       const membership = db.prepare('SELECT * FROM memberships WHERE org_id=? AND user_id=?')
         .get(invite.org_id, user.id);
 
-      if (membership && membership.status !== 'removed') {
+      if (membership) {
         if (membership.status === 'active') throw conflict('you are already a member of this org');
-        db.prepare("UPDATE memberships SET status='active', role=?, joined_at=? WHERE id=?")
-          .run(invite.role, nowIso(), membership.id);
-        bumpPermVersion(db, { orgId: invite.org_id, userId: user.id });
-      } else if (membership) {
         db.prepare("UPDATE memberships SET status='active', role=?, joined_at=? WHERE id=?")
           .run(invite.role, nowIso(), membership.id);
         bumpPermVersion(db, { orgId: invite.org_id, userId: user.id });

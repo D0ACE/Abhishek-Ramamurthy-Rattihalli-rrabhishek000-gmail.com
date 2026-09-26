@@ -114,6 +114,7 @@ export function register(router, { db }) {
   // Leave an org. Self-service, so no user:remove needed — but still cannot
   // orphan the org.
   router.delete('/v1/orgs/:org/members/me', (ctx, params, res) => {
+    assertActiveMembership(ctx);
     assertNotLastOwner(db, params.org, ctx.userId);
     removeMembership(db, ctx, params.org, ctx.userId, 'member.leave');
     send(res, 204, undefined);
