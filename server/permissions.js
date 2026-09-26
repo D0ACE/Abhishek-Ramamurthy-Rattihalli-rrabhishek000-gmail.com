@@ -36,7 +36,7 @@ function expand(pattern, catalogue) {
 //                         *some* device.
 //   deviceId === 'x'   -> exact check. Org-wide grants plus grants for that device.
 // ---------------------------------------------------------------------------
-function collectGrants(db, { userId, orgId, deviceId, at }) {
+function collectGrants(db, { userId, orgId, deviceId, at, orgScopeOnly = false }) {
   const common = `
     SELECT g.id AS grant_id, g.device_id, g.effect, gp.permission
       FROM grants g
@@ -46,6 +46,10 @@ function collectGrants(db, { userId, orgId, deviceId, at }) {
        AND g.revoked_at IS NULL
        AND (g.starts_at  IS NULL OR g.starts_at  <= ?)
        AND (g.expires_at IS NULL OR g.expires_at >  ?)`;
+
+  if (orgScopeOnly) {
+    return db.prepare(`${common} AND g.device_id IS NULL`).all(userId, orgId, at, at);
+  }
 
   if (deviceId === null) {
     return db.prepare(common).all(userId, orgId, at, at);
@@ -129,7 +133,7 @@ function buildPermissions({ catalogue, role, baseline, grants }) {
 //   2. collect applicable grants (org, device scope, time window)
 //   3-5. buildPermissions
 // ---------------------------------------------------------------------------
-export function resolve(db, { userId, orgId, deviceId = null, now = new Date() }) {
+export function resolve(db, { userId, orgId, deviceId = null, now = new Date(), orgScopeOnly = false }) {
   const at = now.toISOString();
   const catalogue = loadCatalogue(db);
 
@@ -139,7 +143,7 @@ export function resolve(db, { userId, orgId, deviceId = null, now = new Date() }
   if (gate) return denyAll(catalogue, membership.role, gate);
 
   const baseline = loadBaseline(db, membership.role);
-  const grants = collectGrants(db, { userId, orgId, deviceId, at });
+  const grants = collectGrants(db, { userId, orgId, deviceId, at, orgScopeOnly });
 
   return {
     role: membership.role,
@@ -224,7 +228,14 @@ export function assertCan(db, ctx, permission, deviceId) {
 // holds every permission being granted, at that scope", and the whole point is that an
 // admin carrying an org-wide deny cannot hand that permission to anyone.
 export function assertMayGrant(db, ctx, patterns, deviceId = null) {
-  const { permissions } = resolve(db, { ...ctx, deviceId });
+  // Distinguish permission-resolution context from grant-authority scope (hidden concept A3).
+  // For an org-wide grant (deviceId === null), the caller must hold the permission at
+  // true org scope (baseline or org-wide allow grant), NOT merely on a single device.
+  const { permissions } = resolve(db, {
+    ...ctx,
+    deviceId,
+    orgScopeOnly: deviceId === null,
+  });
   const catalogue = Object.keys(permissions);
 
   for (const pattern of patterns) {
@@ -236,6 +247,10 @@ export function assertMayGrant(db, ctx, patterns, deviceId = null) {
       );
     }
   }
+}
+
+export function assertOrgWideGrantAuthority(db, ctx, patterns) {
+  return assertMayGrant(db, ctx, patterns, null);
 }
 
 // The compound check: session:start AND the permission for the requested mode.

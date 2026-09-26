@@ -285,5 +285,25 @@ This was originally logged as an acknowledged UX gap; addressed in Phase 10 belo
 3. **Verification**:
    Tested rehire lifecycle: invite -> accept -> remove member -> re-invite same email -> accept. Verified that exactly one membership record exists and the user is restored to active status without constraint errors.
 
+---
+
+### Phase 12 — Permission Engine Hardening: Grant Scope vs Resolution Context (A3)
+
+2026-09-26. Addressed hidden vulnerability A3 (privilege laundering at org scope):
+
+1. **Diagnosis**:
+   `assertMayGrant()` previously invoked `resolve(db, { ...ctx, deviceId })`.
+   When creating an org-wide grant (`deviceId === null`), the resolver collected all grants including device-scoped grants (the union behavior intended for UI navigation). Consequently, a caller holding `device:control` strictly on Device A appeared to hold `device:control` at org scope and was erroneously permitted to mint an org-wide grant for `device:control`.
+
+2. **Fix**:
+   - Added `orgScopeOnly` support to `collectGrants()` and `resolve()`. When `orgScopeOnly` is true, grants with `device_id IS NOT NULL` are strictly excluded from resolution.
+   - Updated `assertMayGrant()`: when validating an org-wide grant (`deviceId === null`), pass `orgScopeOnly: true`.
+   - Exported `assertOrgWideGrantAuthority()` for explicit org-wide grant checks.
+   - Preserved `resolve(null)` union behavior for navigation cards and active device discovery.
+
+3. **Verification**:
+   Validated that an operator with device-scoped `device:control` can grant on that specific device, but attempting an org-wide grant throws `403 FORBIDDEN` / `missing_permission`.
+
+
 
 

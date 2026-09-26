@@ -251,4 +251,38 @@ implemented dynamic role discovery:
 **Verification:**
 Verified by running `npm run db:reset` and confirming the runtime database contained 6 roles (`viewer`, `auditor`, `operator`, `reviewer`, `admin`, `owner`). The role selection dropdown and invite prompt dynamically populated with all 6 roles. All 25 Playwright tests, 66 API tests, 35 permission tests, and 18 personalisation tests pass.
 
+---
+
+### 11. Permission resolution context vs grant-authority scope (Privilege Laundering A3)
+
+**Problem:**
+`assertMayGrant()` previously resolved the caller's authority using `resolve(db, { ...ctx, deviceId })`.
+For org-wide grants (`deviceId === null`), the resolver intentionally evaluates the union across all devices
+so that UI navigation icons light up if a caller can act on *some* device. However, this created a subtle
+privilege laundering vulnerability: a caller holding `device:control` strictly on a single device could grant
+`device:control` org-wide, conferencing authority they did not hold at true org scope.
+
+**What I initially expected:**
+Using `resolve(db, { ...ctx, deviceId: null })` would reflect the caller's org-level authority.
+
+**What actually happened:**
+Because `collectGrants` includes device-scoped grants when `deviceId === null` to support UI navigation,
+a device-scoped grant elevated the caller's apparent org-level permissions in `assertMayGrant`.
+
+**Decision:**
+Distinguish permission-resolution context from grant-authority scope:
+1. Extended `collectGrants` and `resolve` with an `orgScopeOnly` boolean flag.
+2. In `assertMayGrant`, when evaluating authority for an org-wide grant (`deviceId === null`), enforce
+   `orgScopeOnly: true`. This restricts applicable grants strictly to `g.device_id IS NULL` and role baselines.
+3. For device-scoped grants (`deviceId !== null`), evaluate authority against the specific target device.
+4. Preserved normal `resolve(db, ctx)` union behavior for navigation and UI cards.
+
+**Alternative rejected:**
+Altering `resolve(null)` globally to exclude device grants. Rejected because UI navigation contract requires
+nav cards and sections to be present if the user has authority on any device in the organization.
+
+**Why rejected:**
+Would break the console contract and cause navigation items to disappear for operators with device-scoped grants.
+
+
 
