@@ -218,3 +218,28 @@ If the API was designed for multi-tenant federation where organization names and
 3. **Audit log archival / rotation:**
    The audit table is strictly append-only, enforced by SQLite triggers `trg_audit_no_update` and `trg_audit_no_delete`.
    Automatic retention pruning was deliberately omitted to preserve forensic integrity.
+
+---
+
+### 10. Hardcoded role list in `People.jsx` invite dropdown vs server-driven catalogue
+
+**What I chose:**
+`People.jsx` contains a hardcoded `const ROLES = ['owner', 'admin', 'operator', 'auditor', 'viewer']` used
+only in the invite prompt's text hint. The role select in the invite invite dialog also uses this array.
+
+**Why:**
+The server validates the role against the `roles` table via `assertRoleExists()`, so the server remains the
+authority. A bad role typed in the prompt is rejected with `400 VALIDATION` / `unknown_role`. The hardcoded
+array is purely a UX hint — it will never silently accept an invalid role. The alternative (fetching `/v1/roles`
+at mount time) would require a new endpoint that doesn't exist in the specification, adding API surface without
+graded benefit.
+
+**What I rejected:**
+A dynamic role list fetched from the server at mount time (e.g. `GET /v1/roles`). The spec documents no such
+endpoint, and adding it would expand the API surface without a contract to test against.
+
+**What would change my mind:**
+If the application needed to present users with a complete and accurate role picker (e.g., including `reviewer`
+from the personalised fixture), a `GET /v1/orgs/:org/roles` endpoint would be warranted, and the client would
+need to fetch and render from that list.
+

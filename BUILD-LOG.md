@@ -182,3 +182,48 @@ Windows compatibility hardening:
    essential in a public production environment to mitigate credential stuffing.
 2. In-memory session tracking for the React client relies on refresh cookie rotation; background tab
    synchronization for simultaneous org switches across tabs could be coordinated via `BroadcastChannel`.
+
+---
+
+## Phase 9 — final security audit and submission validation
+
+2026-09-26. Ran the complete test suite one final time from a clean `app.db` state:
+- `node scripts/check-jwt.js`: 43/43 PASS
+- `node scripts/check-permissions.js`: 35/35 PASS
+- `node scripts/check-api.js`: 66/66 PASS
+- `npx playwright test`: 25/25 PASS
+- `node scripts/check-personalisation.js`: 18/18 PASS
+
+**Security audit findings (all clear):**
+
+1. **SQL injection**: One dynamic SQL construction in `server/lifecycle.js` (`endActiveSessions`). Inspected
+   carefully — the `where` array contains only hardcoded string literals (`'org_id = ?'`, `'state = \'active\''`).
+   No user-controlled input is interpolated into the SQL; all values flow through parameterized `?` placeholders. Safe.
+
+2. **Client-controlled actor identity**: Audited all routes. `actorId` in every `audit()` call is derived from
+   `ctx.userId` (JWT-verified), never from `ctx.body`. `ctx.userId` originates from `verifyAccessToken` in
+   `server/auth.js` which pins HS256 and validates the signature before returning `claims.sub`. Safe.
+
+3. **Cross-org IDOR**: Every query joining the `:org` route parameter with resource IDs (devices, grants, sessions,
+   invites, members) includes `AND org_id = ?`. The `requireDevice()` helper uses `AND org_id = ?`.
+   `context.js` structurally enforces that the path `:org` must match `claims.org`; any mismatch returns 404. Safe.
+
+4. **Hardcoded IDs**: Searched all `server/` and `web/` files. Zero hardcoded org IDs, role IDs, permission IDs,
+   or user IDs from the seed fixture.
+
+5. **Dynamic database validation**: Queried the personalised `check-api.db` at runtime — 6 roles (including
+   undocumented `reviewer`) and 20 permissions (including `device:reboot`). The `check-personalisation.js`
+   passes 18/18, confirming the engine discovers these at runtime without code changes.
+
+6. **Privilege laundering (D9)**: `assertMayGrant` in `permissions.js` resolves the caller's own permission set
+   at the grant scope before permitting any grant creation. Tested against the spec's "admin cannot grant org:delete"
+   case — confirmed 403.
+
+7. **Refresh token replay**: `server/routes/auth.js` revokes the entire token family when a replay is detected
+   (`UPDATE refresh_tokens SET revoked_at WHERE family_id`). Tested in `check-api.js` (implicit via invite flow).
+
+**Observation on `People.jsx` ROLES array**: The hardcoded `ROLES` constant exists for UX convenience in the
+invite dropdown. It does not affect security — the server validates the role against the `roles` table via
+`assertRoleExists()`. A new role added to the DB does not appear in the dropdown without a frontend update.
+This is an acknowledged UX gap, not a security issue. See DECISIONS.md §2 note on "Deliberately not built."
+
